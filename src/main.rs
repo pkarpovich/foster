@@ -1,5 +1,9 @@
 use std::process::ExitCode;
 
+mod name;
+mod rm;
+mod zmx;
+
 const USAGE: &str = "usage:
   foster run <name> -- <command...>   start a command and attach to it
   foster ls [--json]                  list processes started with foster
@@ -16,7 +20,8 @@ fn dispatch(args: &[&str]) -> Result<(), String> {
             println!("foster {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        ["run" | "ls" | "attach" | "rm", ..] => Err("not implemented".to_string()),
+        ["rm", rest @ ..] => rm::run(rest),
+        ["run" | "ls" | "attach", ..] => Err("not implemented".to_string()),
         [command, ..] => Err(format!("unknown command \"{command}\"\n\n{USAGE}")),
     }
 }
