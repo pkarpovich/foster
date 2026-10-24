@@ -353,6 +353,24 @@ fn rm_reports_zmx_failure() {
     );
 }
 
+#[test]
+fn rm_reports_kill_failure_with_zero_exit() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("name=web\tpid=1\tclients=0\tcreated=1\n");
+    let path = harness.fake_bin.join("foster-zmx");
+    let mut script = fs::read_to_string(&path).expect("read fake");
+    script.push_str(
+        "if [ \"$1\" = kill ]; then echo 'failed to kill session=web: SessionUnresponsive' >&2; exit 0; fi\n",
+    );
+    fs::write(&path, script).expect("write fake");
+    let output = harness.output(&["rm", "web"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "foster: zmx kill failed: failed to kill session=web: SessionUnresponsive\n"
+    );
+}
+
 fn foster_path() -> String {
     fs::canonicalize(env!("CARGO_BIN_EXE_foster"))
         .expect("canonical foster path")
