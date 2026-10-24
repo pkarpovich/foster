@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -27,15 +30,46 @@ const REMOVED_VARS: [&str; 14] = [
 
 #[derive(Debug, PartialEq)]
 pub enum Session {
-    Live { name: String },
-    Broken { name: String },
+    Live {
+        name: String,
+        labels: BTreeMap<String, String>,
+    },
+    Broken {
+        name: String,
+    },
 }
 
 impl Session {
     pub fn name(&self) -> &str {
         match self {
-            Session::Live { name } | Session::Broken { name } => name,
+            Session::Live { name, labels: _ } | Session::Broken { name } => name,
         }
+    }
+
+    pub fn is_running(&self) -> bool {
+        match self {
+            Session::Live { name: _, labels } => !labels.contains_key("exit_code"),
+            Session::Broken { name: _ } => false,
+        }
+    }
+}
+
+pub struct Nonce(String);
+
+impl Nonce {
+    pub fn generate() -> Nonce {
+        let mut bytes = [0u8; 16];
+        let mut urandom = File::open("/dev/urandom").expect("open /dev/urandom");
+        urandom.read_exact(&mut bytes).expect("read /dev/urandom");
+        let mut hex = String::new();
+        for byte in bytes {
+            hex.push_str(&format!("{byte:02x}"));
+        }
+        Nonce(hex)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -83,6 +117,7 @@ fn parse_line(line: &str) -> Option<Session> {
     }
     let mut name = None;
     let mut broken = false;
+    let mut labels = BTreeMap::new();
     for field in line.split('\t') {
         let Some((key, value)) = field.split_once('=') else {
             continue;
@@ -90,14 +125,17 @@ fn parse_line(line: &str) -> Option<Session> {
         match key {
             "name" => name = Some(value.to_string()),
             "err" => broken = true,
-            _ => {}
+            "pid" | "clients" | "created" | "cwd" | "cmd" | "status" => {}
+            _ => {
+                labels.insert(key.to_string(), value.to_string());
+            }
         }
     }
     let name = name?;
     if broken {
         return Some(Session::Broken { name });
     }
-    Some(Session::Live { name })
+    Some(Session::Live { name, labels })
 }
 
 pub fn parse_sessions(output: &str) -> Vec<Session> {
@@ -149,6 +187,23 @@ impl Zmx {
         Ok(parse_sessions(&stdout))
     }
 
+    pub fn attach_command(&self, name: &SessionName) -> Command {
+        let mut command = self.command();
+        command
+            .arg("attach")
+            .arg(name.as_str())
+            .env("ZMX_MANAGED", Nonce::generate().as_str())
+            .env("ZMX_MANAGED_CLAIM", "1");
+        command
+    }
+
+    pub fn create_detached(&self, name: &SessionName, argv: &[String]) -> Result<(), String> {
+        let mut command = self.command();
+        command.arg("attach").arg(name.as_str()).args(argv);
+        self.run("attach", command)?;
+        Ok(())
+    }
+
     pub fn set_labels(&self, name: &SessionName, labels: &[(&str, String)]) -> Result<(), String> {
         let mut command = self.command();
         command.arg("set").arg(name.as_str());
@@ -175,12 +230,41 @@ mod tests {
     fn parses_live_line() {
         let line = "name=web\tpid=4242\tclients=0\tcreated=1792866550\tcwd=file://h/x\tcmd=a -- b\tended=1\n";
         let sessions = parse_sessions(line);
+        let mut labels = BTreeMap::new();
+        labels.insert("ended".to_string(), "1".to_string());
         assert_eq!(
             sessions,
             vec![Session::Live {
-                name: "web".to_string()
+                name: "web".to_string(),
+                labels
             }]
         );
+    }
+
+    #[test]
+    fn parses_exit_code_and_ended_labels() {
+        let line = "name=web\tpid=1\tclients=0\tcreated=2\tended=1792870000\texit_code=3\n";
+        let sessions = parse_sessions(line);
+        let [session] = sessions.as_slice() else {
+            panic!("expected one session");
+        };
+        let Session::Live { name: _, labels } = session else {
+            panic!("expected a live session");
+        };
+        assert_eq!(labels.get("exit_code").map(String::as_str), Some("3"));
+        assert_eq!(labels.get("ended").map(String::as_str), Some("1792870000"));
+        assert!(!session.is_running());
+    }
+
+    #[test]
+    fn nonce_is_32_lowercase_hex_and_unique() {
+        let first = Nonce::generate();
+        let second = Nonce::generate();
+        assert_eq!(first.as_str().len(), 32);
+        for character in first.as_str().chars() {
+            assert!(character.is_ascii_digit() || ('a'..='f').contains(&character));
+        }
+        assert_ne!(first.as_str(), second.as_str());
     }
 
     #[test]

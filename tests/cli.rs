@@ -75,9 +75,10 @@ impl Harness {
         let ls_file = self.home.path().join("ls-output");
         fs::write(&ls_file, ls_output).expect("ls output");
         let script = format!(
-            "#!/bin/sh\necho \"$* ZMX_DIR=$ZMX_DIR ZMX_SESSION=${{ZMX_SESSION-unset}} CLAUDECODE=${{CLAUDECODE-unset}}\" >> '{}'\ncase \"$1\" in ls) cat '{}' ;; esac\n",
+            "#!/bin/sh\necho \"$* ZMX_DIR=$ZMX_DIR ZMX_SESSION=${{ZMX_SESSION-unset}} CLAUDECODE=${{CLAUDECODE-unset}}\" >> '{}'\ncase \"$1\" in ls) cat '{}' ;; attach) echo \"cwd=$(pwd) managed=${{ZMX_MANAGED-unset}}\" >> '{}' ;; esac\n",
             self.zmx_log().display(),
-            ls_file.display()
+            ls_file.display(),
+            self.attach_log().display()
         );
         let path = self.fake_bin.join("foster-zmx");
         fs::write(&path, script).expect("fake zmx");
@@ -129,6 +130,23 @@ impl Harness {
         fs::read_to_string(self.zmx_log()).unwrap_or_default()
     }
 
+    fn attach_log(&self) -> PathBuf {
+        self.home.path().join("attach.log")
+    }
+
+    fn attach_details(&self) -> String {
+        fs::read_to_string(self.attach_log()).unwrap_or_default()
+    }
+
+    fn fail_zmx_command(&self, command: &str, message: &str) {
+        let path = self.fake_bin.join("foster-zmx");
+        let mut script = fs::read_to_string(&path).expect("read fake");
+        script.push_str(&format!(
+            "if [ \"$1\" = {command} ]; then echo {message} >&2; exit 1; fi\n"
+        ));
+        fs::write(&path, script).expect("write fake");
+    }
+
     fn output(&self, args: &[&str]) -> Output {
         self.foster(args).output().expect("run foster")
     }
@@ -173,7 +191,7 @@ fn unknown_command_prints_usage_to_stderr() {
 #[test]
 fn unimplemented_commands_fail() {
     let harness = Harness::new();
-    for command in ["run", "ls", "attach"] {
+    for command in ["ls", "attach"] {
         let output = harness.output(&[command]);
         assert_eq!(output.status.code(), Some(1), "{command}");
         assert_eq!(
@@ -292,6 +310,141 @@ fn rm_reports_zmx_failure() {
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
         "foster: zmx kill failed: boom\n"
+    );
+}
+
+fn foster_path() -> String {
+    fs::canonicalize(env!("CARGO_BIN_EXE_foster"))
+        .expect("canonical foster path")
+        .display()
+        .to_string()
+}
+
+fn zmx_calls_without_env(harness: &Harness) -> Vec<String> {
+    let mut calls = Vec::new();
+    for line in harness.zmx_calls().lines() {
+        let Some((call, _)) = line.split_once(" ZMX_DIR=") else {
+            continue;
+        };
+        calls.push(call.to_string());
+    }
+    calls
+}
+
+#[test]
+fn run_starts_detached_session_without_terminal() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let cwd = harness.home.path().canonicalize().expect("canonical home");
+    let output = harness
+        .foster(&["run", "web", "--", "sh", "-c", "sleep 1"])
+        .current_dir(&cwd)
+        .output()
+        .expect("run foster");
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "started web\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    let expected = vec![
+        "ls".to_string(),
+        format!("attach web {} hold web -- sh -c sleep 1", foster_path()),
+    ];
+    assert_eq!(zmx_calls_without_env(&harness), expected);
+    assert_eq!(
+        harness.attach_details(),
+        format!("cwd={} managed=unset\n", cwd.display())
+    );
+}
+
+#[test]
+fn run_refuses_running_duplicate() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("name=web\tpid=1\tclients=0\tcreated=1\n");
+    let output = harness.output(&["run", "web", "--", "true"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "foster: web is already running\n"
+    );
+    assert_eq!(zmx_calls_without_env(&harness), vec!["ls".to_string()]);
+}
+
+#[test]
+fn run_replaces_exited_session() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("name=web\tpid=1\tclients=0\tcreated=1\tended=5\texit_code=3\n");
+    let output = harness.output(&["run", "web", "--", "true"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "started web\n");
+    let expected = vec![
+        "ls".to_string(),
+        "kill web".to_string(),
+        format!("attach web {} hold web -- true", foster_path()),
+    ];
+    assert_eq!(zmx_calls_without_env(&harness), expected);
+}
+
+#[test]
+fn run_replaces_broken_session() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("name=web\terr=ConnectionRefused\tstatus=cleaning up\n");
+    let output = harness.output(&["run", "web", "--", "true"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "started web\n");
+    let expected = vec![
+        "ls".to_string(),
+        "kill web".to_string(),
+        format!("attach web {} hold web -- true", foster_path()),
+    ];
+    assert_eq!(zmx_calls_without_env(&harness), expected);
+}
+
+#[test]
+fn run_wrong_shape_prints_usage() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    for args in [
+        &["run"][..],
+        &["run", "web"],
+        &["run", "web", "--"],
+        &["run", "web", "true"],
+        &["run", "--", "true"],
+    ] {
+        let output = harness.output(args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "foster: usage: foster run <name> -- <command...>\n",
+            "{args:?}"
+        );
+    }
+    assert_eq!(harness.zmx_calls(), "");
+}
+
+#[test]
+fn run_invalid_name_fails_before_zmx() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let output = harness.output(&["run", "a b", "--", "true"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "foster: invalid name a b: use letters, digits, - _ . :\n"
+    );
+    assert_eq!(harness.zmx_calls(), "");
+}
+
+#[test]
+fn run_reports_attach_failure() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    harness.fail_zmx_command("attach", "boom");
+    let output = harness.output(&["run", "web", "--", "true"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "foster: zmx attach failed: boom\n"
     );
 }
 
