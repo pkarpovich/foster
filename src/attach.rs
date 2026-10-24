@@ -20,7 +20,14 @@ pub fn run(args: &[&str]) -> Result<(), String> {
         return Err(format!("no session {}", name.as_str()));
     };
     match session {
-        Session::Live { .. } => {}
+        Session::Live {
+            name: _,
+            clients: _,
+            created: _,
+            cwd: _,
+            cmd: _,
+            labels: _,
+        } => {}
         Session::Broken { name: _ } => {
             return Err(format!(
                 "session {} is broken: run foster rm {}",

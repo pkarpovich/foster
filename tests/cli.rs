@@ -508,9 +508,25 @@ fn hold_records_exit_code_and_runs_shell() {
         .strip_prefix("set web exit_code=3 ended=")
         .expect("set call");
     let digits = ended.split(' ').next().expect("ended value");
-    assert!(!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()));
+    assert!(digits.parse::<u64>().is_ok(), "{digits:?}");
     let cwd = harness.home.path().canonicalize().expect("canonical home");
     assert_eq!(harness.shell_calls(), format!("-l cwd={}\n", cwd.display()));
+}
+
+#[test]
+fn hold_hides_zmx_dir_from_command_and_shell() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let shell = harness.install_fake_shell();
+    let seen = harness.home.path().join("seen");
+    let script = format!("echo \"${{ZMX_DIR-unset}}\" > '{}'", seen.display());
+    let output = harness
+        .hold(&shell, &["web", "--", "sh", "-c", &script])
+        .env("ZMX_DIR", "/leak")
+        .output()
+        .expect("run hold");
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(fs::read_to_string(&seen).expect("seen"), "unset\n");
 }
 
 #[test]

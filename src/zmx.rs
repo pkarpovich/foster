@@ -228,10 +228,13 @@ pub fn parse_sessions(output: &str) -> Vec<Session> {
             _ => records.push(line.to_string()),
         }
     }
-    records
-        .iter()
-        .filter_map(|record| parse_line(record))
-        .collect()
+    let mut sessions = Vec::new();
+    for record in &records {
+        if let Some(session) = parse_line(record) {
+            sessions.push(session);
+        }
+    }
+    sessions
 }
 
 impl Zmx {
@@ -337,7 +340,12 @@ mod tests {
         let sessions = parse_sessions(output);
         assert_eq!(sessions.len(), 2);
         let Session::Live {
-            name, cmd, labels, ..
+            name,
+            clients: _,
+            created: _,
+            cwd: _,
+            cmd,
+            labels,
         } = &sessions[0]
         else {
             panic!("expected live session");

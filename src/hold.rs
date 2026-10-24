@@ -75,7 +75,11 @@ pub fn run(args: &[&str]) -> Result<(), String> {
         words.push(word.to_string());
     }
     let rendered = render_command(&words);
-    let (code, line) = match Command::new(program).args(rest).status() {
+    let (code, line) = match Command::new(program)
+        .args(rest)
+        .env_remove("ZMX_DIR")
+        .status()
+    {
         Ok(status) => {
             let code = exit_code(status);
             (code, format!("{rendered} exited with {code}"))
@@ -107,7 +111,7 @@ pub fn run(args: &[&str]) -> Result<(), String> {
     let _ = stdout.flush();
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let mut command = Command::new(&shell);
-    command.arg("-l");
+    command.arg("-l").env_remove("ZMX_DIR");
     clean_env(&mut command);
     let error = command.exec();
     Err(format!("exec {shell}: {error}"))

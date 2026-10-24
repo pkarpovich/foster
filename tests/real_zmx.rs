@@ -248,7 +248,13 @@ fn isolation() {
         zmx: real.bin.join("foster-zmx"),
         dir: other_dir.path().to_path_buf(),
     };
-    assert_eq!(real.foster_stdout(&["ls"]), "");
+    let listed = real
+        .command("foster", other_dir.path())
+        .arg("ls")
+        .output()
+        .expect("run foster ls");
+    assert!(listed.status.success());
+    assert_eq!(String::from_utf8_lossy(&listed.stdout), "");
 }
 
 struct KillOther {
