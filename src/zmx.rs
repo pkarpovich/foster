@@ -303,15 +303,17 @@ impl Zmx {
         Ok(())
     }
 
-    pub fn kill(&self, name: &SessionName) -> Result<(), String> {
+    pub fn kill(&self, name: &SessionName, force: bool) -> Result<(), String> {
         let mut command = self.command();
         command.arg("kill").arg(name.as_str());
+        if force {
+            command.arg("--force");
+        }
         let output = command
             .stdin(Stdio::null())
             .output()
             .map_err(|error| format!("zmx kill: {error}"))?;
         let stderr = String::from_utf8_lossy(&output.stderr);
-        // zmx exits 0 even when the kill itself failed and only reports it on stderr.
         if !output.status.success() || stderr.contains("failed to kill") {
             return Err(format!("zmx kill failed: {}", stderr.trim_end()));
         }

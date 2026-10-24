@@ -2,7 +2,7 @@ use std::io::IsTerminal;
 use std::os::unix::process::CommandExt;
 
 use crate::name::SessionName;
-use crate::zmx::Zmx;
+use crate::zmx::{Session, Zmx};
 
 pub fn run(args: &[&str]) -> Result<(), String> {
     let [name, "--", command @ ..] = args else {
@@ -20,7 +20,7 @@ pub fn run(args: &[&str]) -> Result<(), String> {
         if session.is_running() {
             return Err(format!("{} is already running", name.as_str()));
         }
-        zmx.kill(&name)?;
+        zmx.kill(&name, matches!(session, Session::Broken { .. }))?;
     }
     let current = std::env::current_exe().map_err(|error| format!("current_exe: {error}"))?;
     let mut argv = vec![

@@ -270,7 +270,7 @@ fn rm_removes_broken_session() {
     let output = harness.output(&["rm", "web"]);
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "removed web\n");
-    assert!(harness.zmx_calls().contains("kill web "));
+    assert!(harness.zmx_calls().contains("kill web --force"));
 }
 
 #[test]
@@ -451,7 +451,7 @@ fn run_replaces_broken_session() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "started web\n");
     let expected = vec![
         "ls".to_string(),
-        "kill web".to_string(),
+        "kill web --force".to_string(),
         format!("attach web {} hold web -- true", foster_path()),
     ];
     assert_eq!(zmx_calls_without_env(&harness), expected);
