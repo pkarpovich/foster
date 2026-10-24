@@ -13,6 +13,8 @@ const USAGE: &str = "usage:
   foster run <name> -- <command...>   start a command and attach to it
   foster ls [--json]                  list processes started with foster
   foster attach <name>                attach to a process (detach: Ctrl+C)
+  foster history <name> [-f]          print a process's output, -f keeps following
+  foster tail <name>                  stream a process's new output
   foster rm <name>                    stop a process and remove it
 ";
 
@@ -75,7 +77,7 @@ impl Harness {
         let ls_file = self.home.path().join("ls-output");
         fs::write(&ls_file, ls_output).expect("ls output");
         let script = format!(
-            "#!/bin/sh\necho \"$* ZMX_DIR=$ZMX_DIR ZMX_SESSION=${{ZMX_SESSION-unset}} CLAUDECODE=${{CLAUDECODE-unset}}\" >> '{}'\ncase \"$1\" in ls) cat '{}' ;; attach) echo \"cwd=$(pwd) managed=${{ZMX_MANAGED-unset}}\" >> '{}' ;; esac\n",
+            "#!/bin/sh\necho \"$* ZMX_DIR=$ZMX_DIR ZMX_SESSION=${{ZMX_SESSION-unset}} CLAUDECODE=${{CLAUDECODE-unset}}\" >> '{}'\ncase \"$1\" in ls) cat '{}' ;; attach) echo \"cwd=$(pwd) managed=${{ZMX_MANAGED-unset}}\" >> '{}' ;; history) printf 'line one\\nline two\\n' ;; tail) printf 'streamed\\n' ;; esac\n",
             self.zmx_log().display(),
             ls_file.display(),
             self.attach_log().display()
@@ -186,6 +188,121 @@ fn unknown_command_prints_usage_to_stderr() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
     let expected = format!("foster: unknown command \"frobnicate\"\n\n{USAGE}");
     assert_eq!(String::from_utf8_lossy(&output.stderr), expected);
+}
+
+#[test]
+fn history_prints_the_session_output() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("name=web\tpid=1\tclients=0\tcreated=1\n");
+    let output = harness.output(&["history", "web"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "line one\nline two\n"
+    );
+    assert_eq!(
+        zmx_calls_without_env(&harness),
+        vec!["ls".to_string(), "history web".to_string()]
+    );
+}
+
+#[test]
+fn history_follow_prints_the_past_then_the_stream() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("name=web\tpid=1\tclients=0\tcreated=1\n");
+    for args in [["history", "web", "-f"], ["history", "--follow", "web"]] {
+        let output = harness.output(&args);
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "line one\nline two\nstreamed\n"
+        );
+    }
+}
+
+#[test]
+fn history_follow_stops_its_tail_when_terminated() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("name=web\tpid=1\tclients=0\tcreated=1\n");
+    let fake = harness.fake_bin.join("foster-zmx");
+    let pid_file = harness.home.path().join("tail.pid");
+    let script = fs::read_to_string(&fake).expect("fake script");
+    let script = script.replace(
+        "tail) printf 'streamed\\n' ;;",
+        &format!(
+            "tail) echo $$ > '{}'; exec sleep 300 ;;",
+            pid_file.display()
+        ),
+    );
+    fs::write(&fake, script).expect("rewrite fake");
+    let mut follow = harness
+        .foster(&["history", "web", "-f"])
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("spawn history -f");
+    poll_until(Duration::from_secs(5), Duration::from_millis(50), || {
+        fs::read_to_string(&pid_file).is_ok_and(|text| !text.trim().is_empty())
+    });
+    let tail_pid: u32 = fs::read_to_string(&pid_file)
+        .expect("tail pid")
+        .trim()
+        .parse()
+        .expect("numeric pid");
+    let status = Command::new("kill")
+        .args(["-TERM", &follow.id().to_string()])
+        .status()
+        .expect("send SIGTERM");
+    assert!(status.success());
+    poll_until(Duration::from_secs(5), Duration::from_millis(50), || {
+        follow.try_wait().expect("try_wait").is_some()
+    });
+    let code = follow.wait().expect("wait").code();
+    assert_eq!(code, Some(143));
+    poll_until(Duration::from_secs(5), Duration::from_millis(50), || {
+        process_gone(tail_pid)
+    });
+}
+
+#[test]
+fn history_of_a_missing_session_fails() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let output = harness.output(&["history", "web"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "foster: no session web\n"
+    );
+    assert_eq!(zmx_calls_without_env(&harness), vec!["ls".to_string()]);
+}
+
+#[test]
+fn tail_streams_the_session_output() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("name=web\tpid=1\tclients=0\tcreated=1\n");
+    let output = harness.output(&["tail", "web"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "streamed\n");
+    assert_eq!(
+        zmx_calls_without_env(&harness),
+        vec!["ls".to_string(), "tail web".to_string()]
+    );
+}
+
+#[test]
+fn history_and_tail_print_usage_without_a_name() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let history = harness.output(&["history"]);
+    assert_eq!(
+        String::from_utf8_lossy(&history.stderr),
+        "foster: usage: foster history <name> [-f]\n"
+    );
+    let tail = harness.output(&["tail"]);
+    assert_eq!(
+        String::from_utf8_lossy(&tail.stderr),
+        "foster: usage: foster tail <name>\n"
+    );
 }
 
 #[test]

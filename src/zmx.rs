@@ -404,6 +404,43 @@ impl Zmx {
         Ok(())
     }
 
+    pub fn require_live(&self, name: &SessionName) -> Result<(), String> {
+        let mut found = None;
+        for session in self.sessions()? {
+            if session.name() == name.as_str() {
+                found = Some(session);
+            }
+        }
+        match found {
+            None => Err(format!("no session {}", name.as_str())),
+            Some(Session::Broken { name: _ }) => Err(format!(
+                "session {} is broken: run foster rm {}",
+                name.as_str(),
+                name.as_str()
+            )),
+            Some(Session::Live {
+                name: _,
+                clients: _,
+                created: _,
+                cwd: _,
+                cmd: _,
+                labels: _,
+            }) => Ok(()),
+        }
+    }
+
+    pub fn history(&self, name: &SessionName) -> Result<String, String> {
+        let mut command = self.command();
+        command.arg("history").arg(name.as_str());
+        self.run("history", command)
+    }
+
+    pub fn tail_command(&self, name: &SessionName) -> Command {
+        let mut command = self.command();
+        command.arg("tail").arg(name.as_str());
+        command
+    }
+
     pub fn set_labels(&self, name: &SessionName, labels: &[(&str, String)]) -> Result<(), String> {
         let mut command = self.command();
         command.arg("set").arg(name.as_str());

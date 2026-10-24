@@ -42,6 +42,14 @@ Attach to a process. Ctrl+C (or Ctrl+\) detaches and leaves the process running.
 foster attach web
 ```
 
+Read what a process printed, for a script or an agent that has no terminal. `history` prints the scrollback and the screen as plain text and exits. `history -f` prints the same and then keeps streaming new output until interrupted. `tail` streams only new output. Streamed output keeps the program's escape codes:
+
+```
+foster history web
+foster history web -f
+foster tail web
+```
+
 Stop a process and remove its record:
 
 ```

@@ -150,12 +150,7 @@ impl Real {
     }
 
     fn history(&self, name: &str) -> String {
-        let output = self
-            .command("foster-zmx", &self.zmx_dir)
-            .args(["history", name])
-            .output()
-            .expect("run foster-zmx history");
-        String::from_utf8_lossy(&output.stdout).into_owned()
+        self.foster_stdout(&["history", name])
     }
 }
 
