@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::Read;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -32,6 +34,10 @@ const REMOVED_VARS: [&str; 14] = [
 pub enum Session {
     Live {
         name: String,
+        clients: u32,
+        created: i64,
+        cwd: Option<PathBuf>,
+        cmd: Option<String>,
         labels: BTreeMap<String, String>,
     },
     Broken {
@@ -42,13 +48,28 @@ pub enum Session {
 impl Session {
     pub fn name(&self) -> &str {
         match self {
-            Session::Live { name, labels: _ } | Session::Broken { name } => name,
+            Session::Live {
+                name,
+                clients: _,
+                created: _,
+                cwd: _,
+                cmd: _,
+                labels: _,
+            }
+            | Session::Broken { name } => name,
         }
     }
 
     pub fn is_running(&self) -> bool {
         match self {
-            Session::Live { name: _, labels } => !labels.contains_key("exit_code"),
+            Session::Live {
+                name: _,
+                clients: _,
+                created: _,
+                cwd: _,
+                cmd: _,
+                labels,
+            } => !labels.contains_key("exit_code"),
             Session::Broken { name: _ } => false,
         }
     }
@@ -111,12 +132,53 @@ fn find_executable() -> Result<PathBuf, String> {
     Err(NOT_FOUND.to_string())
 }
 
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn percent_decode(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'%'
+            && index + 2 < bytes.len()
+            && let Some(high) = hex_value(bytes[index + 1])
+            && let Some(low) = hex_value(bytes[index + 2])
+        {
+            decoded.push(high * 16 + low);
+            index += 3;
+            continue;
+        }
+        decoded.push(byte);
+        index += 1;
+    }
+    decoded
+}
+
+fn decode_cwd(uri: &str) -> Option<PathBuf> {
+    let rest = uri.strip_prefix("file://")?;
+    let slash = rest.find('/')?;
+    let path = &rest[slash..];
+    Some(PathBuf::from(OsString::from_vec(percent_decode(path))))
+}
+
 fn parse_line(line: &str) -> Option<Session> {
     if line.starts_with(EMPTY_LIST_PREFIX) {
         return None;
     }
     let mut name = None;
     let mut broken = false;
+    let mut clients = 0;
+    let mut created = 0;
+    let mut cwd = None;
+    let mut cmd = None;
     let mut labels = BTreeMap::new();
     for field in line.split('\t') {
         let Some((key, value)) = field.split_once('=') else {
@@ -125,7 +187,11 @@ fn parse_line(line: &str) -> Option<Session> {
         match key {
             "name" => name = Some(value.to_string()),
             "err" => broken = true,
-            "pid" | "clients" | "created" | "cwd" | "cmd" | "status" => {}
+            "clients" => clients = value.parse().unwrap_or(0),
+            "created" => created = value.parse().unwrap_or(0),
+            "cwd" => cwd = decode_cwd(value),
+            "cmd" => cmd = Some(value.to_string()),
+            "pid" | "status" => {}
             _ => {
                 labels.insert(key.to_string(), value.to_string());
             }
@@ -135,7 +201,14 @@ fn parse_line(line: &str) -> Option<Session> {
     if broken {
         return Some(Session::Broken { name });
     }
-    Some(Session::Live { name, labels })
+    Some(Session::Live {
+        name,
+        clients,
+        created,
+        cwd,
+        cmd,
+        labels,
+    })
 }
 
 pub fn parse_sessions(output: &str) -> Vec<Session> {
@@ -236,9 +309,24 @@ mod tests {
             sessions,
             vec![Session::Live {
                 name: "web".to_string(),
+                clients: 0,
+                created: 1792866550,
+                cwd: Some(PathBuf::from("/x")),
+                cmd: Some("a -- b".to_string()),
                 labels
             }]
         );
+    }
+
+    #[test]
+    fn decodes_cwd_uri() {
+        assert_eq!(
+            decode_cwd("file://host.local/Users/me/my%20proj%C3%A9"),
+            Some(PathBuf::from("/Users/me/my projé"))
+        );
+        assert_eq!(decode_cwd("file:///a%zz"), Some(PathBuf::from("/a%zz")));
+        assert_eq!(decode_cwd("file:///a%4"), Some(PathBuf::from("/a%4")));
+        assert_eq!(decode_cwd("/plain"), None);
     }
 
     #[test]
@@ -248,7 +336,15 @@ mod tests {
         let [session] = sessions.as_slice() else {
             panic!("expected one session");
         };
-        let Session::Live { name: _, labels } = session else {
+        let Session::Live {
+            name: _,
+            clients: _,
+            created: _,
+            cwd: _,
+            cmd: _,
+            labels,
+        } = session
+        else {
             panic!("expected a live session");
         };
         assert_eq!(labels.get("exit_code").map(String::as_str), Some("3"));

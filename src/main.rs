@@ -1,6 +1,7 @@
 use std::process::ExitCode;
 
 mod hold;
+mod list;
 mod name;
 mod rm;
 mod run;
@@ -25,7 +26,8 @@ fn dispatch(args: &[&str]) -> Result<(), String> {
         ["hold", rest @ ..] => hold::run(rest),
         ["rm", rest @ ..] => rm::run(rest),
         ["run", rest @ ..] => run::run(rest),
-        ["ls" | "attach", ..] => Err("not implemented".to_string()),
+        ["ls", rest @ ..] => list::run(rest),
+        ["attach", ..] => Err("not implemented".to_string()),
         [command, ..] => Err(format!("unknown command \"{command}\"\n\n{USAGE}")),
     }
 }

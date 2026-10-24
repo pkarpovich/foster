@@ -189,17 +189,14 @@ fn unknown_command_prints_usage_to_stderr() {
 }
 
 #[test]
-fn unimplemented_commands_fail() {
+fn unimplemented_attach_fails() {
     let harness = Harness::new();
-    for command in ["ls", "attach"] {
-        let output = harness.output(&[command]);
-        assert_eq!(output.status.code(), Some(1), "{command}");
-        assert_eq!(
-            String::from_utf8_lossy(&output.stderr),
-            "foster: not implemented\n",
-            "{command}"
-        );
-    }
+    let output = harness.output(&["attach"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "foster: not implemented\n"
+    );
 }
 
 #[test]
@@ -561,4 +558,58 @@ fn hold_survives_sigint() {
     poll_until(Duration::from_secs(5), second, || {
         hold.try_wait().expect("try_wait").is_some()
     });
+}
+
+const LS_OUTPUT: &str = "name=web\tpid=1\tclients=1\tcreated=1792866550\tcwd=file://host.local/tmp/home/my%20proj\tcmd=/x/foster hold web -- sh -c 'echo ready; sleep 300'\n\
+name=boom\tpid=2\tclients=0\tcreated=1792866600\tcwd=file://host.local/opt/x\tcmd=/x/foster hold boom -- sh -c 'exit 3'\tended=1792866700\texit_code=3\n\
+name=bad\terr=ConnectionRefused\tstatus=cleaning up\n";
+
+fn ls_output(harness: &Harness, args: &[&str]) -> Output {
+    harness.install_fake_zmx(LS_OUTPUT);
+    let mut command = harness.foster(args);
+    command.env("TZ", "UTC").env("HOME", "/tmp/home");
+    command.output().expect("run foster ls")
+}
+
+#[test]
+fn ls_prints_table() {
+    let harness = Harness::new();
+    let output = ls_output(&harness, &["ls"]);
+    assert_eq!(output.status.code(), Some(0));
+    let expected = "NAME  STATUS    ATTACHED  STARTED           CWD        COMMAND\n\
+bad   error     no        -                 -          -\n\
+boom  exited 3  no        2026-10-24 18:30  /opt/x     sh -c 'exit 3'\n\
+web   running   yes       2026-10-24 18:29  ~/my proj  sh -c 'echo ready; sleep 300'\n";
+    assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+}
+
+#[test]
+fn ls_prints_json() {
+    let harness = Harness::new();
+    let output = ls_output(&harness, &["ls", "--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let expected = "[{\"name\":\"bad\",\"status\":\"error\",\"exit_code\":null,\"attached\":false,\"started\":null,\"cwd\":null,\"command\":null},\
+{\"name\":\"boom\",\"status\":\"exited 3\",\"exit_code\":3,\"attached\":false,\"started\":1792866600,\"cwd\":\"/opt/x\",\"command\":\"sh -c 'exit 3'\"},\
+{\"name\":\"web\",\"status\":\"running\",\"exit_code\":null,\"attached\":true,\"started\":1792866550,\"cwd\":\"/tmp/home/my proj\",\"command\":\"sh -c 'echo ready; sleep 300'\"}]\n";
+    assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+}
+
+#[test]
+fn ls_with_no_sessions_prints_nothing() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let output = harness.output(&["ls"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+}
+
+#[test]
+fn ls_rejects_other_arguments() {
+    let harness = Harness::new();
+    let output = harness.output(&["ls", "--bogus"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "foster: usage: foster ls [--json]\n"
+    );
 }
