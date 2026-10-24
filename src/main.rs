@@ -8,6 +8,7 @@ mod output;
 mod proxy;
 mod rm;
 mod run;
+mod task;
 mod zmx;
 
 const USAGE: &str = "usage:
@@ -16,7 +17,8 @@ const USAGE: &str = "usage:
   foster attach <name>                attach to a process (detach: Ctrl+C)
   foster history <name> [-f]          print a process's output, -f keeps following
   foster tail <name>                  stream a process's new output
-  foster rm <name>                    stop a process and remove it";
+  foster rm <name>                    stop a process and remove it
+  foster task [<name> | --json]       list or start a task from .zed/tasks.json";
 
 fn dispatch(args: &[&str]) -> Result<(), String> {
     match args {
@@ -35,6 +37,7 @@ fn dispatch(args: &[&str]) -> Result<(), String> {
         ["attach", rest @ ..] => attach::run(rest),
         ["history", rest @ ..] => output::history(rest),
         ["tail", rest @ ..] => output::tail(rest),
+        ["task", rest @ ..] => task::run(rest),
         [command, ..] => Err(format!("unknown command \"{command}\"\n\n{USAGE}")),
     }
 }

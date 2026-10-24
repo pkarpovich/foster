@@ -50,6 +50,14 @@ foster history web -f
 foster tail web
 ```
 
+Start a task the project already defines for Zed. foster reads `.zed/tasks.json` at the root of the git checkout (or the nearest parent folder that has one), names each task `<repository>:<label as a slug>`, and starts it like `foster run` with the task's `command` and `args` through `$SHELL -c`, its `cwd` and its `env`. `$ZED_WORKTREE_ROOT` and `$ZED_MAIN_GIT_WORKTREE` are filled in; a task that needs any other editor variable (`$ZED_FILE`, `$ZED_STEM`, ...) without a default is listed but refused. The repository name comes from git, so every worktree of a repository uses the same names:
+
+```
+foster task                     # list: name, Zed label, command
+foster task --json              # the same as JSON
+foster task web-dev             # start <repository>:web-dev, the task labelled "web: dev"
+```
+
 Stop a process and remove its record:
 
 ```

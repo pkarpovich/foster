@@ -16,6 +16,7 @@ const USAGE: &str = "usage:
   foster history <name> [-f]          print a process's output, -f keeps following
   foster tail <name>                  stream a process's new output
   foster rm <name>                    stop a process and remove it
+  foster task [<name> | --json]       list or start a task from .zed/tasks.json
 ";
 
 fn poll_until(timeout: Duration, interval: Duration, mut check: impl FnMut() -> bool) {
@@ -329,6 +330,129 @@ fn history_and_tail_print_usage_without_a_name() {
     assert_eq!(
         String::from_utf8_lossy(&tail.stderr),
         "foster: usage: foster tail <name>\n"
+    );
+}
+
+fn task_project(harness: &Harness, tasks: &str) -> PathBuf {
+    let repo = harness.home.path().join("myrepo");
+    fs::create_dir_all(repo.join(".zed")).expect("project dir");
+    fs::write(repo.join(".zed/tasks.json"), tasks).expect("tasks file");
+    let status = Command::new("/usr/bin/git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .env_clear()
+        .env("HOME", harness.home.path())
+        .status()
+        .expect("git init");
+    assert!(status.success());
+    repo.canonicalize().expect("canonical repo")
+}
+
+const TASKS: &str = r#"[
+    /* servers */
+    {
+        "label": "web: dev",
+        "command": "pnpm dev",
+        "cwd": "$ZED_WORKTREE_ROOT/web",
+        "env": { "PORT": "5173", },
+    },
+    { "label": "test current file", "command": "go test -run $ZED_STEM", },
+]"#;
+
+#[test]
+fn task_lists_the_zed_tasks() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let repo = task_project(&harness, TASKS);
+    let output = harness
+        .foster(&["task"])
+        .current_dir(&repo)
+        .env("SHELL", "/bin/sh")
+        .output()
+        .expect("run foster");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "NAME                      LABEL                                     COMMAND\n\
+         myrepo:web-dev            web: dev                                  pnpm dev\n\
+         myrepo:test-current-file  test current file (needs Zed: $ZED_STEM)  go test -run $ZED_STEM\n"
+    );
+}
+
+#[test]
+fn task_starts_through_run_in_the_task_directory() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let repo = task_project(&harness, TASKS);
+    fs::create_dir_all(repo.join("web")).expect("web dir");
+    let output = harness
+        .foster(&["task", "web-dev"])
+        .current_dir(&repo)
+        .env("SHELL", "/bin/sh")
+        .output()
+        .expect("run foster");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "started myrepo:web-dev\n"
+    );
+    let expected = vec![
+        "ls".to_string(),
+        format!(
+            "attach myrepo:web-dev {} hold myrepo:web-dev -- env PORT=5173 /bin/sh -c pnpm dev",
+            foster_path()
+        ),
+    ];
+    assert_eq!(zmx_calls_without_env(&harness), expected);
+    assert_eq!(
+        harness.attach_details(),
+        format!("cwd={} managed=unset\n", repo.join("web").display())
+    );
+}
+
+#[test]
+fn task_refuses_a_task_that_needs_zed() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let repo = task_project(&harness, TASKS);
+    let output = harness
+        .foster(&["task", "test-current-file"])
+        .current_dir(&repo)
+        .output()
+        .expect("run foster");
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "foster: task \"test current file\" needs Zed ($ZED_STEM)\n"
+    );
+    assert_eq!(harness.zmx_calls(), "");
+}
+
+#[test]
+fn task_reports_an_unknown_name_and_a_missing_file() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let repo = task_project(&harness, TASKS);
+    let unknown = harness
+        .foster(&["task", "nope"])
+        .current_dir(&repo)
+        .output()
+        .expect("run foster");
+    assert_eq!(unknown.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&unknown.stderr).starts_with("foster: no task nope in "),
+        "{unknown:?}"
+    );
+    let empty = harness.home.path().join("empty");
+    fs::create_dir_all(&empty).expect("empty dir");
+    let missing = harness
+        .foster(&["task"])
+        .current_dir(&empty)
+        .output()
+        .expect("run foster");
+    assert_eq!(
+        String::from_utf8_lossy(&missing.stderr),
+        "foster: no .zed/tasks.json in this project\n"
     );
 }
 

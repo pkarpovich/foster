@@ -7,7 +7,7 @@ description: >
   docker compose up in the foreground) to outlive your turn or your session, instead of `&`, `nohup`,
   `run_in_background` or a tmux window. Also use it when the user asks whether something is running,
   wants the output or error of a server that was started earlier, or asks to stop or restart one,
-  and whenever `foster ls`, `foster run`, `foster history` or a foster session name like
+  and whenever `foster ls`, `foster run`, `foster task`, `foster history`, a project's `.zed/tasks.json` or a foster session name like
   `project:service` comes up. Skip it for commands that finish on their own (tests, builds, one-off scripts).
 ---
 
@@ -31,10 +31,23 @@ tell the user and fall back to whatever they normally use.
 | `foster history <name> -f` | The same, then keeps streaming new output until killed. | Only under a timeout |
 | `foster tail <name>` | Streams only new output, escape codes included, until killed. | Only under a timeout |
 | `foster rm <name>` | Stops the process and removes its record. | See "Stopping" |
+| `foster task [<name> \| --json]` | List the project's `.zed/tasks.json` tasks, or start one like `run`. | Yes |
 | `foster attach <name>` | Interactive attach for a human. Needs a terminal and fails without one. | No |
 
 Your Bash tool has no terminal, so `foster run` always takes the detached path for you. Never call
 `foster attach`; tell the user the command to run instead.
+
+## Starting a project's own tasks
+
+If the project has `.zed/tasks.json`, prefer its tasks over writing the command yourself: the user already
+named them and they carry the right directory and environment.
+
+- `foster task --json` lists them: `name` (`<repository>:<label slug>`), `label`, `command`, `cwd`,
+  and `needs` (an editor variable such as `ZED_STEM` that makes the task Zed-only, else null).
+- `foster task <name>` starts one exactly like `foster run`; the short slug (`web-dev`) or the full name (`myrepo:web-dev`)
+  both work. A task with `needs` set cannot run outside Zed; say so instead of rewriting it.
+- The repository part comes from git, so the main checkout and every worktree share names, and running
+  the same task from a second worktree is refused while the first runs.
 
 ## Starting a process
 
