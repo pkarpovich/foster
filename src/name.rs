@@ -12,7 +12,7 @@ impl SessionName {
                 valid_chars = false;
             }
         }
-        if !valid_length || !valid_chars || text == "." || text == ".." {
+        if !valid_length || !valid_chars || text == "." || text == ".." || text.starts_with('-') {
             return Err(format!("invalid name {text}: use letters, digits, - _ . :"));
         }
         Ok(SessionName(text.to_string()))
@@ -39,7 +39,17 @@ mod tests {
     #[test]
     fn rejects_invalid_names() {
         let long = "a".repeat(51);
-        for text in ["", long.as_str(), ".", "..", "a b", "a/b", "é"] {
+        for text in [
+            "",
+            long.as_str(),
+            ".",
+            "..",
+            "a b",
+            "a/b",
+            "é",
+            "-h",
+            "--force",
+        ] {
             let error = SessionName::parse(text).expect_err(text);
             assert_eq!(
                 error,
