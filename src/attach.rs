@@ -1,7 +1,7 @@
 use std::io::IsTerminal;
-use std::os::unix::process::CommandExt;
 
 use crate::name::SessionName;
+use crate::proxy;
 use crate::zmx::{Session, Zmx};
 
 pub fn run(args: &[&str]) -> Result<(), String> {
@@ -39,6 +39,5 @@ pub fn run(args: &[&str]) -> Result<(), String> {
     if !std::io::stdin().is_terminal() {
         return Err("attach needs a terminal".to_string());
     }
-    let error = zmx.attach_command(&name).exec();
-    Err(format!("exec foster-zmx: {error}"))
+    proxy::attach(&zmx, &name, &[])
 }

@@ -217,8 +217,10 @@ fn acceptance() {
     assert!(!duplicate.status.success());
     assert_eq!(
         String::from_utf8_lossy(&duplicate.stderr),
-        "foster: web is already running\n"
+        "foster: web is already running a different command\n"
     );
+    let joined = real.foster_stdout(&["run", "web", "--", "sh", "-c", &web_script]);
+    assert_eq!(joined, "already running web\n");
 
     assert_eq!(real.foster_stdout(&["rm", "web"]), "removed web\n");
     assert_eq!(real.foster_stdout(&["rm", "boom"]), "removed boom\n");

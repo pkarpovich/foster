@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use jiff::Timestamp;
@@ -7,6 +8,8 @@ use serde::Serialize;
 use crate::zmx::{Session, Zmx, decode_word};
 
 const HEADER: [&str; 6] = ["NAME", "STATUS", "ATTACHED", "STARTED", "CWD", "COMMAND"];
+const CWD_MIN: usize = 20;
+const COMMAND_MIN: usize = 10;
 
 #[derive(Debug, PartialEq, Serialize)]
 struct Row {
@@ -39,7 +42,7 @@ pub fn run(args: &[&str]) -> Result<(), String> {
     match format {
         Format::Table => {
             let home = std::env::var_os("HOME").map(PathBuf::from);
-            print!("{}", render_table(&rows, home.as_deref()));
+            print!("{}", render_table(&rows, home.as_deref(), terminal_width()));
         }
         Format::Json => {
             let json = serde_json::to_string(&rows).map_err(|error| format!("json: {error}"))?;
@@ -159,7 +162,62 @@ fn visible(text: &str) -> String {
     shown
 }
 
-fn render_table(rows: &[Row], home: Option<&Path>) -> String {
+fn terminal_width() -> Option<usize> {
+    let stdout = std::io::stdout();
+    if !stdout.is_terminal() {
+        return None;
+    }
+    let size = rustix::termios::tcgetwinsize(&stdout).ok()?;
+    if size.ws_col == 0 {
+        return None;
+    }
+    Some(usize::from(size.ws_col))
+}
+
+fn cut_left(text: &str, width: usize) -> String {
+    let count = text.chars().count();
+    if count <= width {
+        return text.to_string();
+    }
+    let mut kept = String::from("…");
+    for character in text.chars().skip(count + 1 - width) {
+        kept.push(character);
+    }
+    kept
+}
+
+fn cut_right(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let mut kept = String::new();
+    for character in text.chars().take(width - 1) {
+        kept.push(character);
+    }
+    kept.push('…');
+    kept
+}
+
+fn fit(widths: &mut [usize; 5], cells: &[[String; 6]], terminal: usize) -> Option<usize> {
+    let mut longest_command = 0;
+    for line in cells {
+        longest_command = longest_command.max(line[5].chars().count());
+    }
+    let mut fixed = 0;
+    for width in &widths[..4] {
+        fixed += width + 2;
+    }
+    let total = fixed + widths[4] + 2 + longest_command;
+    if total <= terminal {
+        return None;
+    }
+    let spare = widths[4].saturating_sub(CWD_MIN);
+    widths[4] -= (total - terminal).min(spare);
+    let room = terminal.saturating_sub(fixed + widths[4] + 2);
+    Some(room.max(COMMAND_MIN))
+}
+
+fn render_table(rows: &[Row], home: Option<&Path>, terminal: Option<usize>) -> String {
     if rows.is_empty() {
         return String::new();
     }
@@ -202,15 +260,27 @@ fn render_table(rows: &[Row], home: Option<&Path>) -> String {
             *width = (*width).max(line[index].chars().count());
         }
     }
+    let command_width = match terminal {
+        Some(terminal) => fit(&mut widths, &cells, terminal),
+        None => None,
+    };
     let mut table = String::new();
     for line in &cells {
         for (index, width) in widths.iter().enumerate() {
-            table.push_str(&line[index]);
-            for _ in line[index].chars().count()..*width + 2 {
+            let cell = if index == 4 {
+                cut_left(&line[index], *width)
+            } else {
+                line[index].clone()
+            };
+            table.push_str(&cell);
+            for _ in cell.chars().count()..*width + 2 {
                 table.push(' ');
             }
         }
-        table.push_str(&line[5]);
+        match command_width {
+            Some(width) => table.push_str(&cut_right(&line[5], width)),
+            None => table.push_str(&line[5]),
+        }
         table.push('\n');
     }
     table
@@ -350,7 +420,7 @@ mod tests {
         let expected = "NAME  STATUS   ATTACHED  STARTED  CWD  COMMAND\n\
                         web   running  no        -        ~/p  pnpm dev\n\
                         bad   error    no        -        -    -\n";
-        let table = render_table(&rows, Some(Path::new("/h")));
+        let table = render_table(&rows, Some(Path::new("/h")), None);
         assert_eq!(table, expected);
         for line in table.lines() {
             assert_eq!(line, line.trim_end());
@@ -368,7 +438,7 @@ mod tests {
             cwd: Some(PathBuf::from("/h/\x1b]52;c;x\x07")),
             command: Some("a\tb\nc".to_string()),
         }];
-        let table = render_table(&rows, None);
+        let table = render_table(&rows, None, None);
         assert!(!table.contains('\x1b'), "{table:?}");
         assert!(!table.contains('\x07'), "{table:?}");
         assert_eq!(table.lines().count(), 2);
@@ -381,8 +451,66 @@ mod tests {
         assert_eq!(format_started(1792866550).len(), "2026-10-24 18:29".len());
     }
 
+    fn wide_row() -> Row {
+        Row {
+            name: "turtle-hub:yotei-app".to_string(),
+            status: "running".to_string(),
+            exit_code: None,
+            attached: true,
+            started: None,
+            cwd: Some(PathBuf::from(
+                "/h/Projects/worktrees/turtle-hub/fix-yotei-app-sheet-mermaid/services/yotei-app",
+            )),
+            command: Some("mise exec -- pnpm dev".to_string()),
+        }
+    }
+
+    #[test]
+    fn cut_keeps_short_text() {
+        assert_eq!(cut_left("abc", 3), "abc");
+        assert_eq!(cut_right("abc", 3), "abc");
+    }
+
+    #[test]
+    fn cut_left_keeps_the_tail() {
+        assert_eq!(cut_left("/a/b/services/app", 8), "…ces/app");
+    }
+
+    #[test]
+    fn cut_right_keeps_the_head() {
+        assert_eq!(cut_right("mise exec -- pnpm dev", 10), "mise exec…");
+    }
+
+    #[test]
+    fn table_fits_the_terminal_by_cutting_cwd_first() {
+        let table = render_table(&[wide_row()], Some(Path::new("/h")), Some(110));
+        let expected = "NAME                  STATUS   ATTACHED  STARTED  CWD                                    COMMAND\n\
+                        turtle-hub:yotei-app  running  yes       -        …app-sheet-mermaid/services/yotei-app  mise exec -- pnpm dev\n";
+        assert_eq!(table, expected);
+        assert_eq!(
+            table.lines().nth(1).unwrap_or_default().chars().count(),
+            110
+        );
+    }
+
+    #[test]
+    fn table_cuts_the_command_once_cwd_is_at_its_minimum() {
+        let table = render_table(&[wide_row()], Some(Path::new("/h")), Some(80));
+        let row = table.lines().nth(1).unwrap_or_default();
+        assert!(row.contains("…/services/yotei-app"), "{row:?}");
+        assert!(row.ends_with("mise exec…"), "{row:?}");
+    }
+
+    #[test]
+    fn table_is_untouched_when_it_fits_or_has_no_terminal() {
+        let wide = render_table(&[wide_row()], Some(Path::new("/h")), Some(400));
+        let piped = render_table(&[wide_row()], Some(Path::new("/h")), None);
+        assert_eq!(wide, piped);
+        assert!(!piped.contains('…'), "{piped:?}");
+    }
+
     #[test]
     fn empty_list_renders_nothing() {
-        assert_eq!(render_table(&[], None), "");
+        assert_eq!(render_table(&[], None, None), "");
     }
 }

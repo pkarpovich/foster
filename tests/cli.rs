@@ -12,7 +12,7 @@ use tempfile::TempDir;
 const USAGE: &str = "usage:
   foster run <name> -- <command...>   start a command and attach to it
   foster ls [--json]                  list processes started with foster
-  foster attach <name>                attach to a process (detach: Ctrl+\\)
+  foster attach <name>                attach to a process (detach: Ctrl+C)
   foster rm <name>                    stop a process and remove it
 ";
 
@@ -453,16 +453,66 @@ fn run_waits_for_the_name_lock() {
 }
 
 #[test]
-fn run_refuses_running_duplicate() {
+fn run_refuses_running_duplicate_with_another_command() {
     let harness = Harness::new();
-    harness.install_fake_zmx("name=web\tpid=1\tclients=0\tcreated=1\n");
-    let output = harness.output(&["run", "web", "--", "true"]);
+    let cwd = harness.home.path().canonicalize().expect("canonical home");
+    harness.install_fake_zmx(&format!(
+        "name=web\tpid=1\tclients=0\tcreated=1\tcwd=file://host{}\tcmd=/x/foster hold web -- pnpm dev\n",
+        cwd.display()
+    ));
+    let output = harness
+        .foster(&["run", "web", "--", "pnpm", "build"])
+        .current_dir(&cwd)
+        .output()
+        .expect("run foster");
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "foster: web is already running\n"
+        "foster: web is already running a different command\n"
     );
+    assert_eq!(zmx_calls_without_env(&harness), vec!["ls".to_string()]);
+}
+
+#[test]
+fn run_refuses_running_duplicate_from_another_directory() {
+    let harness = Harness::new();
+    let cwd = harness.home.path().canonicalize().expect("canonical home");
+    harness.install_fake_zmx(
+        "name=web\tpid=1\tclients=0\tcreated=1\tcwd=file://host/elsewhere\tcmd=/x/foster hold web -- pnpm dev\n",
+    );
+    let output = harness
+        .foster(&["run", "web", "--", "pnpm", "dev"])
+        .current_dir(&cwd)
+        .output()
+        .expect("run foster");
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "foster: web is already running a different command\n"
+    );
+    assert_eq!(zmx_calls_without_env(&harness), vec!["ls".to_string()]);
+}
+
+#[test]
+fn run_joins_running_duplicate_with_the_same_command() {
+    let harness = Harness::new();
+    let cwd = harness.home.path().canonicalize().expect("canonical home");
+    harness.install_fake_zmx(&format!(
+        "name=web\tpid=1\tclients=0\tcreated=1\tcwd=file://host{}\tcmd=/x/foster hold web -- sh -c 'echo ready; sleep 300'\n",
+        cwd.display()
+    ));
+    let output = harness
+        .foster(&["run", "web", "--", "sh", "-c", "echo ready; sleep 300"])
+        .current_dir(&cwd)
+        .output()
+        .expect("run foster");
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "already running web\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
     assert_eq!(zmx_calls_without_env(&harness), vec!["ls".to_string()]);
 }
 

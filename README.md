@@ -23,7 +23,7 @@ Start a command and attach to it:
 foster run web -- pnpm dev
 ```
 
-A name has 1 to 50 characters: letters, digits, `-`, `_`, `.` and `:`. `foster run` refuses a name that is still running. Run `foster rm` first.
+A name has 1 to 50 characters: letters, digits, `-`, `_`, `.` and `:`. Running `foster run` again with the same name, command and directory attaches to the process that is already running, so a Zed task or a script can call it repeatedly. The same name with a different command or directory is refused; run `foster rm` first.
 
 Without a terminal (a script, an agent, a dropped ssh link) the command starts detached and foster prints `started web`.
 
@@ -36,7 +36,7 @@ foster ls --json
 
 `--json` prints one array. Each object has `name`, `status` (`running`, `exited <code>` or `error`), `exit_code` (number or null), `attached` (bool), `started` (epoch seconds or null), `cwd` (path or null) and `command` (string or null).
 
-Attach to a process. Detach with Ctrl+\:
+Attach to a process. Ctrl+C (or Ctrl+\) detaches and leaves the process running. Ctrl+C never reaches the process, so stop it with `foster rm`. When a second terminal attaches, the first one shows a cover; press any key there to take the process back:
 
 ```
 foster attach web

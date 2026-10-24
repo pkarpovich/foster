@@ -1,7 +1,8 @@
 use std::io::IsTerminal;
-use std::os::unix::process::CommandExt;
 
+use crate::hold::render_command;
 use crate::name::SessionName;
+use crate::proxy;
 use crate::zmx::{Zmx, encode_word};
 
 pub fn run(args: &[&str]) -> Result<(), String> {
@@ -16,13 +17,26 @@ pub fn run(args: &[&str]) -> Result<(), String> {
     let current = std::env::current_exe().map_err(|error| format!("current_exe: {error}"))?;
     let current = current.to_string_lossy().into_owned();
     check_exe_path(&current)?;
-    let _lock = zmx.lock(&name)?;
+    let cwd = std::env::current_dir().map_err(|error| format!("current_dir: {error}"))?;
+    let mut encoded = Vec::new();
+    for word in command {
+        encoded.push(encode_word(word));
+    }
+    let launch = render_command(&encoded);
+    let lock = zmx.lock(&name)?;
     for session in zmx.sessions()? {
         if session.name() != name.as_str() {
             continue;
         }
         if session.is_running() {
-            return Err(format!("{} is already running", name.as_str()));
+            if !session.matches_launch(&launch, &cwd) {
+                return Err(format!(
+                    "{} is already running a different command",
+                    name.as_str()
+                ));
+            }
+            drop(lock);
+            return join(&zmx, &name);
         }
         zmx.kill(&name, session.kill_mode())?;
     }
@@ -32,15 +46,21 @@ pub fn run(args: &[&str]) -> Result<(), String> {
         name.as_str().to_string(),
         "--".to_string(),
     ];
-    for word in command {
-        argv.push(encode_word(word));
-    }
+    argv.extend(encoded);
     if std::io::stdin().is_terminal() {
-        let error = zmx.attach_command(&name).args(&argv).exec();
-        return Err(format!("exec foster-zmx: {error}"));
+        drop(lock);
+        return proxy::attach(&zmx, &name, &argv);
     }
     zmx.create_detached(&name, &argv)?;
     println!("started {}", name.as_str());
+    Ok(())
+}
+
+fn join(zmx: &Zmx, name: &SessionName) -> Result<(), String> {
+    if std::io::stdin().is_terminal() {
+        return proxy::attach(zmx, name, &[]);
+    }
+    println!("already running {}", name.as_str());
     Ok(())
 }
 

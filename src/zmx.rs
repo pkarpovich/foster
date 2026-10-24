@@ -7,6 +7,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use portable_pty::CommandBuilder;
+
 use crate::name::SessionName;
 
 const EXECUTABLE: &str = "foster-zmx";
@@ -29,6 +31,12 @@ const REMOVED_VARS: [&str; 14] = [
     "CLAUDE_CODE_SESSION_ATTENDED",
     "CLAUDE_CODE_SESSION_ID",
 ];
+
+#[derive(Clone, Copy)]
+pub enum Claim {
+    Take,
+    Leave,
+}
 
 #[derive(Clone, Copy)]
 pub enum KillMode {
@@ -77,6 +85,33 @@ impl Session {
                 labels: _,
             } => KillMode::Graceful,
             Session::Broken { name: _ } => KillMode::Force,
+        }
+    }
+
+    pub fn matches_launch(&self, command: &str, cwd: &Path) -> bool {
+        match self {
+            Session::Live {
+                name: _,
+                clients: _,
+                created: _,
+                cwd: Some(session_cwd),
+                cmd: Some(cmd),
+                labels: _,
+            } => {
+                let Some((_, launched)) = cmd.split_once(" -- ") else {
+                    return false;
+                };
+                launched == command && session_cwd == cwd
+            }
+            Session::Live {
+                name: _,
+                clients: _,
+                created: _,
+                cwd: _,
+                cmd: _,
+                labels: _,
+            } => false,
+            Session::Broken { name: _ } => false,
         }
     }
 
@@ -322,14 +357,29 @@ impl Zmx {
         Ok(parse_sessions(&stdout))
     }
 
-    pub fn attach_command(&self, name: &SessionName) -> Command {
-        let mut command = self.command();
-        command
-            .arg("attach")
-            .arg(name.as_str())
-            .env("ZMX_MANAGED", Nonce::generate().as_str())
-            .env("ZMX_MANAGED_CLAIM", "1");
-        command
+    pub fn attach_builder(
+        &self,
+        name: &SessionName,
+        claim: Claim,
+        extra: &[String],
+    ) -> Result<(CommandBuilder, Nonce), String> {
+        let cwd = std::env::current_dir().map_err(|error| format!("current_dir: {error}"))?;
+        let nonce = Nonce::generate();
+        let mut builder = CommandBuilder::new(&self.executable);
+        builder.arg("attach");
+        builder.arg(name.as_str());
+        builder.args(extra);
+        builder.cwd(cwd);
+        for var in REMOVED_VARS {
+            builder.env_remove(var);
+        }
+        builder.env("ZMX_DIR", &self.socket_dir);
+        builder.env("ZMX_MANAGED", nonce.as_str());
+        match claim {
+            Claim::Take => builder.env("ZMX_MANAGED_CLAIM", "1"),
+            Claim::Leave => {}
+        }
+        Ok((builder, nonce))
     }
 
     pub fn lock(&self, name: &SessionName) -> Result<File, String> {
