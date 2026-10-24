@@ -212,14 +212,26 @@ fn parse_line(line: &str) -> Option<Session> {
     })
 }
 
+fn starts_record(line: &str) -> bool {
+    let line = line.strip_prefix("→").unwrap_or(line);
+    line.trim_start().starts_with("name=")
+}
+
 pub fn parse_sessions(output: &str) -> Vec<Session> {
-    let mut sessions = Vec::new();
+    let mut records: Vec<String> = Vec::new();
     for line in output.lines() {
-        if let Some(session) = parse_line(line) {
-            sessions.push(session);
+        match records.last_mut() {
+            Some(record) if !starts_record(line) && !line.starts_with(EMPTY_LIST_PREFIX) => {
+                record.push('\n');
+                record.push_str(line);
+            }
+            _ => records.push(line.to_string()),
         }
     }
-    sessions
+    records
+        .iter()
+        .filter_map(|record| parse_line(record))
+        .collect()
 }
 
 impl Zmx {
@@ -317,6 +329,23 @@ mod tests {
                 labels
             }]
         );
+    }
+
+    #[test]
+    fn keeps_newline_in_cmd_inside_one_record() {
+        let output = "name=job\tpid=1\tclients=0\tcreated=5\tcmd=sh -c 'make\nexit 3'\tended=9\texit_code=3\nname=other\tpid=2\tclients=0\tcreated=6\n";
+        let sessions = parse_sessions(output);
+        assert_eq!(sessions.len(), 2);
+        let Session::Live {
+            name, cmd, labels, ..
+        } = &sessions[0]
+        else {
+            panic!("expected live session");
+        };
+        assert_eq!(name, "job");
+        assert_eq!(cmd.as_deref(), Some("sh -c 'make\nexit 3'"));
+        assert_eq!(labels.get("exit_code").map(String::as_str), Some("3"));
+        assert_eq!(sessions[1].name(), "other");
     }
 
     #[test]
