@@ -1,7 +1,11 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+use rustix::process::{Pid, Signal, kill_process, test_kill_process};
 
 use tempfile::TempDir;
 
@@ -11,6 +15,36 @@ const USAGE: &str = "usage:
   foster attach <name>                attach to a process (detach: Ctrl+\\)
   foster rm <name>                    stop a process and remove it
 ";
+
+fn poll_until(timeout: Duration, interval: Duration, mut check: impl FnMut() -> bool) {
+    let start = Instant::now();
+    while !check() {
+        assert!(start.elapsed() < timeout, "timed out after {timeout:?}");
+        std::thread::sleep(interval);
+    }
+}
+
+fn pid_of(raw: u32) -> Pid {
+    Pid::from_raw(i32::try_from(raw).expect("pid fits")).expect("valid pid")
+}
+
+fn process_gone(raw: u32) -> bool {
+    if test_kill_process(pid_of(raw)).is_err() {
+        return true;
+    }
+    let output = Command::new("ps")
+        .args(["-o", "stat=", "-p", &raw.to_string()])
+        .output()
+        .expect("run ps");
+    let state = String::from_utf8_lossy(&output.stdout);
+    let state = state.trim();
+    state.is_empty() || state.starts_with('Z')
+}
+
+fn read_pid(path: &Path) -> Option<u32> {
+    let text = fs::read_to_string(path).ok()?;
+    text.trim().parse().ok()
+}
 
 struct Harness {
     home: TempDir,
@@ -48,6 +82,43 @@ impl Harness {
         let path = self.fake_bin.join("foster-zmx");
         fs::write(&path, script).expect("fake zmx");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+
+    fn install_fake_shell(&self) -> PathBuf {
+        let script = format!(
+            "#!/bin/sh\necho \"$* cwd=$(pwd)\" >> '{}'\n",
+            self.shell_log().display()
+        );
+        let path = self.fake_bin.join("fake-shell");
+        fs::write(&path, script).expect("fake shell");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+        path
+    }
+
+    fn shell_log(&self) -> PathBuf {
+        self.home.path().join("shell.log")
+    }
+
+    fn shell_calls(&self) -> String {
+        fs::read_to_string(self.shell_log()).unwrap_or_default()
+    }
+
+    fn hold(&self, shell: &Path, args: &[&str]) -> Command {
+        let mut command = self.foster(&["hold"]);
+        command
+            .args(args)
+            .env("SHELL", shell)
+            .current_dir(self.home.path());
+        command
+    }
+
+    fn spawn_hold(&self, shell: &Path, args: &[&str]) -> Child {
+        self.hold(shell, args)
+            .process_group(0)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn hold")
     }
 
     fn zmx_log(&self) -> PathBuf {
@@ -222,4 +293,119 @@ fn rm_reports_zmx_failure() {
         String::from_utf8_lossy(&output.stderr),
         "foster: zmx kill failed: boom\n"
     );
+}
+
+#[test]
+fn hold_records_exit_code_and_runs_shell() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let shell = harness.install_fake_shell();
+    let output = harness
+        .hold(&shell, &["web", "--", "sh", "-c", "exit 3"])
+        .output()
+        .expect("run hold");
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\r\nfoster: sh -c 'exit 3' exited with 3\r\n"),
+        "{stdout:?}"
+    );
+    let calls = harness.zmx_calls();
+    let ended = calls
+        .strip_prefix("set web exit_code=3 ended=")
+        .expect("set call");
+    let digits = ended.split(' ').next().expect("ended value");
+    assert!(!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()));
+    let cwd = harness.home.path().canonicalize().expect("canonical home");
+    assert_eq!(harness.shell_calls(), format!("-l cwd={}\n", cwd.display()));
+}
+
+#[test]
+fn hold_reports_signal_death_as_128_plus_signal() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let shell = harness.install_fake_shell();
+    let output = harness
+        .hold(&shell, &["web", "--", "sh", "-c", "kill -9 $$"])
+        .output()
+        .expect("run hold");
+    assert_eq!(output.status.code(), Some(0));
+    assert!(harness.zmx_calls().contains("exit_code=137 "));
+}
+
+#[test]
+fn hold_reports_spawn_failure_as_127() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let shell = harness.install_fake_shell();
+    let output = harness
+        .hold(&shell, &["web", "--", "nosuchcmd"])
+        .output()
+        .expect("run hold");
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("foster: nosuchcmd: No such file or directory (os error 2)"),
+        "{stdout:?}"
+    );
+    assert!(harness.zmx_calls().contains("exit_code=127 "));
+    assert!(harness.shell_calls().starts_with("-l "));
+}
+
+#[test]
+fn hold_wrong_arity_prints_usage() {
+    let harness = Harness::new();
+    for args in [&["hold"][..], &["hold", "web"], &["hold", "web", "--"]] {
+        let output = harness.output(args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "foster: usage: foster hold <name> -- <command...>\n",
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn hold_terminates_without_labels_or_shell() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let shell = harness.install_fake_shell();
+    let pidfile = harness.home.path().join("sleep.pid");
+    let script = format!("sleep 300 & echo $! > '{}'; wait", pidfile.display());
+    let mut hold = harness.spawn_hold(&shell, &["web", "--", "sh", "-c", &script]);
+    let second = Duration::from_millis(50);
+    poll_until(Duration::from_secs(5), second, || {
+        read_pid(&pidfile).is_some()
+    });
+    let sleep_pid = read_pid(&pidfile).expect("sleep pid");
+    kill_process(pid_of(hold.id()), Signal::HUP).expect("send HUP");
+    poll_until(Duration::from_secs(5), second, || {
+        hold.try_wait().expect("try_wait").is_some()
+    });
+    assert_eq!(harness.shell_calls(), "");
+    assert_eq!(harness.zmx_calls(), "");
+    poll_until(Duration::from_secs(5), second, || process_gone(sleep_pid));
+}
+
+#[test]
+fn hold_survives_sigint() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let shell = harness.install_fake_shell();
+    let pidfile = harness.home.path().join("sh.pid");
+    let script = format!("echo $$ > '{}'; sleep 300", pidfile.display());
+    let mut hold = harness.spawn_hold(&shell, &["web", "--", "sh", "-c", &script]);
+    let second = Duration::from_millis(50);
+    poll_until(Duration::from_secs(5), second, || {
+        read_pid(&pidfile).is_some()
+    });
+    kill_process(pid_of(hold.id()), Signal::INT).expect("send INT");
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(hold.try_wait().expect("try_wait").is_none());
+    assert_eq!(harness.shell_calls(), "");
+    kill_process(pid_of(hold.id()), Signal::TERM).expect("send TERM");
+    poll_until(Duration::from_secs(5), second, || {
+        hold.try_wait().expect("try_wait").is_some()
+    });
 }

@@ -1,5 +1,6 @@
 use std::process::ExitCode;
 
+mod hold;
 mod name;
 mod rm;
 mod zmx;
@@ -20,6 +21,7 @@ fn dispatch(args: &[&str]) -> Result<(), String> {
             println!("foster {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+        ["hold", rest @ ..] => hold::run(rest),
         ["rm", rest @ ..] => rm::run(rest),
         ["run" | "ls" | "attach", ..] => Err("not implemented".to_string()),
         [command, ..] => Err(format!("unknown command \"{command}\"\n\n{USAGE}")),

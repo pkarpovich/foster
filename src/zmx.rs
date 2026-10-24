@@ -39,6 +39,12 @@ impl Session {
     }
 }
 
+pub fn clean_env(command: &mut Command) {
+    for var in REMOVED_VARS {
+        command.env_remove(var);
+    }
+}
+
 pub struct Zmx {
     executable: PathBuf,
     socket_dir: PathBuf,
@@ -120,9 +126,7 @@ impl Zmx {
     fn command(&self) -> Command {
         let mut command = Command::new(&self.executable);
         command.env("ZMX_DIR", &self.socket_dir);
-        for var in REMOVED_VARS {
-            command.env_remove(var);
-        }
+        clean_env(&mut command);
         command
     }
 
@@ -143,6 +147,16 @@ impl Zmx {
         command.arg("ls");
         let stdout = self.run("ls", command)?;
         Ok(parse_sessions(&stdout))
+    }
+
+    pub fn set_labels(&self, name: &SessionName, labels: &[(&str, String)]) -> Result<(), String> {
+        let mut command = self.command();
+        command.arg("set").arg(name.as_str());
+        for (key, value) in labels {
+            command.arg(format!("{key}={value}"));
+        }
+        self.run("set", command)?;
+        Ok(())
     }
 
     pub fn kill(&self, name: &SessionName) -> Result<(), String> {
