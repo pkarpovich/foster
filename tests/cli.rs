@@ -264,6 +264,33 @@ fn history_follow_stops_its_tail_when_terminated() {
 }
 
 #[test]
+fn history_survives_a_reader_that_closes_early() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("name=web\tpid=1\tclients=0\tcreated=1\n");
+    let fake = harness.fake_bin.join("foster-zmx");
+    let script = fs::read_to_string(&fake).expect("fake script");
+    let script = script.replace(
+        "history) printf 'line one\\nline two\\n' ;;",
+        "history) yes 'a long line of server output' | head -c 400000 ;;",
+    );
+    fs::write(&fake, script).expect("rewrite fake");
+    let mut history = harness
+        .foster(&["history", "web"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn history");
+    let mut stdout = history.stdout.take().expect("stdout");
+    let mut first = [0u8; 16];
+    std::io::Read::read_exact(&mut stdout, &mut first).expect("first bytes");
+    drop(stdout);
+    let output = history.wait_with_output().expect("wait history");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+}
+
+#[test]
 fn history_of_a_missing_session_fails() {
     let harness = Harness::new();
     harness.install_fake_zmx("");

@@ -5,6 +5,7 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use serde::Serialize;
 
+use crate::output::emit;
 use crate::zmx::{Session, Zmx, decode_word};
 
 const HEADER: [&str; 6] = ["NAME", "STATUS", "ATTACHED", "STARTED", "CWD", "COMMAND"];
@@ -42,11 +43,11 @@ pub fn run(args: &[&str]) -> Result<(), String> {
     match format {
         Format::Table => {
             let home = std::env::var_os("HOME").map(PathBuf::from);
-            print!("{}", render_table(&rows, home.as_deref(), terminal_width()));
+            emit(render_table(&rows, home.as_deref(), terminal_width()).as_bytes());
         }
         Format::Json => {
             let json = serde_json::to_string(&rows).map_err(|error| format!("json: {error}"))?;
-            println!("{json}");
+            emit(format!("{json}\n").as_bytes());
         }
     }
     Ok(())

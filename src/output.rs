@@ -10,6 +10,12 @@ use signal_hook::low_level::{exit, register};
 use crate::name::SessionName;
 use crate::zmx::Zmx;
 
+pub fn emit(bytes: &[u8]) {
+    let mut stdout = std::io::stdout();
+    let _ = stdout.write_all(bytes);
+    let _ = stdout.flush();
+}
+
 static TAIL_PID: AtomicI32 = AtomicI32::new(0);
 
 enum Follow {
@@ -28,7 +34,7 @@ pub fn history(args: &[&str]) -> Result<(), String> {
     zmx.require_live(&name)?;
     match follow {
         Follow::No => {
-            print!("{}", zmx.history(&name)?);
+            emit(zmx.history(&name)?.as_bytes());
             Ok(())
         }
         Follow::Yes => follow_history(&zmx, &name),
