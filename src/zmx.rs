@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::PermissionsExt;
@@ -30,6 +30,12 @@ const REMOVED_VARS: [&str; 14] = [
     "CLAUDE_CODE_SESSION_ID",
 ];
 
+#[derive(Clone, Copy)]
+pub enum KillMode {
+    Graceful,
+    Force,
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Session {
     Live {
@@ -57,6 +63,20 @@ impl Session {
                 labels: _,
             }
             | Session::Broken { name } => name,
+        }
+    }
+
+    pub fn kill_mode(&self) -> KillMode {
+        match self {
+            Session::Live {
+                name: _,
+                clients: _,
+                created: _,
+                cwd: _,
+                cmd: _,
+                labels: _,
+            } => KillMode::Graceful,
+            Session::Broken { name: _ } => KillMode::Force,
         }
     }
 
@@ -160,6 +180,32 @@ fn percent_decode(text: &str) -> Vec<u8> {
         index += 1;
     }
     decoded
+}
+
+pub fn encode_word(word: &str) -> String {
+    let characters: Vec<char> = word.chars().collect();
+    let mut encoded = String::new();
+    for (index, &character) in characters.iter().enumerate() {
+        let hex_follows = characters
+            .get(index + 1)
+            .is_some_and(char::is_ascii_hexdigit)
+            && characters
+                .get(index + 2)
+                .is_some_and(char::is_ascii_hexdigit);
+        if character.is_control() || (character == '%' && hex_follows) {
+            let mut buffer = [0u8; 4];
+            for byte in character.encode_utf8(&mut buffer).bytes() {
+                encoded.push_str(&format!("%{byte:02X}"));
+            }
+        } else {
+            encoded.push(character);
+        }
+    }
+    encoded
+}
+
+pub fn decode_word(word: &str) -> String {
+    String::from_utf8_lossy(&percent_decode(word)).into_owned()
 }
 
 fn decode_cwd(uri: &str) -> Option<PathBuf> {
@@ -286,6 +332,21 @@ impl Zmx {
         command
     }
 
+    pub fn lock(&self, name: &SessionName) -> Result<File, String> {
+        let path = self
+            .socket_dir
+            .with_file_name(format!("{}.lock", name.as_str()));
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|error| format!("open {}: {error}", path.display()))?;
+        file.lock()
+            .map_err(|error| format!("lock {}: {error}", path.display()))?;
+        Ok(file)
+    }
+
     pub fn create_detached(&self, name: &SessionName, argv: &[String]) -> Result<(), String> {
         let mut command = self.command();
         command.arg("attach").arg(name.as_str()).args(argv);
@@ -303,11 +364,14 @@ impl Zmx {
         Ok(())
     }
 
-    pub fn kill(&self, name: &SessionName, force: bool) -> Result<(), String> {
+    pub fn kill(&self, name: &SessionName, mode: KillMode) -> Result<(), String> {
         let mut command = self.command();
         command.arg("kill").arg(name.as_str());
-        if force {
-            command.arg("--force");
+        match mode {
+            KillMode::Graceful => {}
+            KillMode::Force => {
+                command.arg("--force");
+            }
         }
         let output = command
             .stdin(Stdio::null())
@@ -414,6 +478,29 @@ mod tests {
         assert_eq!(labels.get("exit_code").map(String::as_str), Some("3"));
         assert_eq!(labels.get("ended").map(String::as_str), Some("1792870000"));
         assert!(!session.is_running());
+    }
+
+    #[test]
+    fn encodes_control_characters_and_ambiguous_percent() {
+        assert_eq!(encode_word("plain %s 100%"), "plain %s 100%");
+        assert_eq!(encode_word("a\tb\nc\x1b"), "a%09b%0Ac%1B");
+        assert_eq!(encode_word("%41 %4"), "%2541 %4");
+        assert_eq!(encode_word("é"), "é");
+    }
+
+    #[test]
+    fn word_round_trips() {
+        for word in [
+            "",
+            "a\tb",
+            "%09",
+            "%0\t9",
+            "x\u{7f}%4f\r\n",
+            "100%",
+            "é\u{85}",
+        ] {
+            assert_eq!(decode_word(&encode_word(word)), word);
+        }
     }
 
     #[test]

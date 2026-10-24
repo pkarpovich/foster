@@ -9,7 +9,7 @@ use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
 use signal_hook::low_level::register;
 
 use crate::name::SessionName;
-use crate::zmx::{Zmx, clean_env};
+use crate::zmx::{Zmx, clean_env, decode_word};
 
 static TERMINATING: AtomicBool = AtomicBool::new(false);
 
@@ -22,7 +22,7 @@ pub fn render_command(words: &[String]) -> String {
     for word in words {
         let mut needs_quotes = word.is_empty();
         for character in word.chars() {
-            if QUOTED.contains(character) {
+            if QUOTED.contains(character) || character.is_control() {
                 needs_quotes = true;
             }
         }
@@ -70,13 +70,13 @@ pub fn run(args: &[&str]) -> Result<(), String> {
     };
     let name = SessionName::parse(name)?;
     install_handlers()?;
-    let mut words = vec![program.to_string()];
+    let mut words = vec![decode_word(program)];
     for word in rest {
-        words.push(word.to_string());
+        words.push(decode_word(word));
     }
     let rendered = render_command(&words);
-    let (code, line) = match Command::new(program)
-        .args(rest)
+    let (code, line) = match Command::new(&words[0])
+        .args(&words[1..])
         .env_remove("ZMX_DIR")
         .status()
     {
@@ -96,18 +96,19 @@ pub fn run(args: &[&str]) -> Result<(), String> {
     if TERMINATING.load(Ordering::SeqCst) {
         std::process::exit(code);
     }
-    if let Ok(zmx) = Zmx::locate() {
-        let ended = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs());
-        let labels = [
-            ("exit_code", code.to_string()),
-            ("ended", ended.to_string()),
-        ];
-        let _ = zmx.set_labels(&name, &labels);
-    }
+    let ended = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let labels = [
+        ("exit_code", code.to_string()),
+        ("ended", ended.to_string()),
+    ];
+    let recorded = Zmx::locate().and_then(|zmx| zmx.set_labels(&name, &labels));
     let mut stdout = std::io::stdout();
     let _ = write!(stdout, "\r\nfoster: {line}\r\n");
+    if let Err(error) = recorded {
+        let _ = write!(stdout, "foster: exit status not recorded: {error}\r\n");
+    }
     let _ = stdout.flush();
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let mut command = Command::new(&shell);
@@ -147,6 +148,11 @@ mod tests {
     #[test]
     fn single_quote_is_escaped() {
         assert_eq!(render(&["echo", "it's"]), "echo 'it'\\''s'");
+    }
+
+    #[test]
+    fn control_character_is_quoted() {
+        assert_eq!(render(&["echo", "a\rb"]), "echo 'a\rb'");
     }
 
     #[test]

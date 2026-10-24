@@ -1,5 +1,5 @@
 use crate::name::SessionName;
-use crate::zmx::{Session, Zmx};
+use crate::zmx::Zmx;
 
 pub fn run(args: &[&str]) -> Result<(), String> {
     let [name] = args else {
@@ -7,16 +7,17 @@ pub fn run(args: &[&str]) -> Result<(), String> {
     };
     let name = SessionName::parse(name)?;
     let zmx = Zmx::locate()?;
+    let _lock = zmx.lock(&name)?;
     let mut found = None;
     for session in zmx.sessions()? {
         if session.name() == name.as_str() {
-            found = Some(matches!(session, Session::Broken { .. }));
+            found = Some(session.kill_mode());
         }
     }
-    let Some(broken) = found else {
+    let Some(mode) = found else {
         return Err(format!("no session {}", name.as_str()));
     };
-    zmx.kill(&name, broken)?;
+    zmx.kill(&name, mode)?;
     println!("removed {}", name.as_str());
     Ok(())
 }

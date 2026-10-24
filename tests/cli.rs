@@ -414,6 +414,45 @@ fn run_starts_detached_session_without_terminal() {
 }
 
 #[test]
+fn run_encodes_control_characters_for_hold() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let output = harness.output(&["run", "web", "--", "echo", "a\tb\nc", "%41"]);
+    assert_eq!(output.status.code(), Some(0));
+    let expected = vec![
+        "ls".to_string(),
+        format!(
+            "attach web {} hold web -- echo a%09b%0Ac %2541",
+            foster_path()
+        ),
+    ];
+    assert_eq!(zmx_calls_without_env(&harness), expected);
+}
+
+#[test]
+fn run_waits_for_the_name_lock() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let state = harness.home.path().join(".local/state/foster");
+    fs::create_dir_all(&state).expect("state dir");
+    let lock = fs::File::create(state.join("web.lock")).expect("lock file");
+    lock.lock().expect("take lock");
+    let mut run = harness
+        .foster(&["run", "web", "--", "true"])
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("spawn run");
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(run.try_wait().expect("try_wait").is_none());
+    assert_eq!(harness.zmx_calls(), "");
+    drop(lock);
+    poll_until(Duration::from_secs(5), Duration::from_millis(50), || {
+        run.try_wait().expect("try_wait").is_some()
+    });
+    assert!(harness.zmx_calls().contains("attach web"));
+}
+
+#[test]
 fn run_refuses_running_duplicate() {
     let harness = Harness::new();
     harness.install_fake_zmx("name=web\tpid=1\tclients=0\tcreated=1\n");
@@ -529,6 +568,63 @@ fn hold_records_exit_code_and_runs_shell() {
     assert!(digits.parse::<u64>().is_ok(), "{digits:?}");
     let cwd = harness.home.path().canonicalize().expect("canonical home");
     assert_eq!(harness.shell_calls(), format!("-l cwd={}\n", cwd.display()));
+}
+
+#[test]
+fn hold_decodes_encoded_words() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let shell = harness.install_fake_shell();
+    let output = harness
+        .hold(
+            &shell,
+            &[
+                "web",
+                "--",
+                "sh",
+                "-c",
+                "test \"$0\" = \"a\tb%2541\"",
+                "a%09b%2541",
+            ],
+        )
+        .output()
+        .expect("run hold");
+    assert_eq!(output.status.code(), Some(0));
+    assert!(harness.zmx_calls().starts_with("set web exit_code=0 "));
+}
+
+#[test]
+fn hold_reports_unrecorded_exit_status() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    harness.fail_zmx_command("set", "boom");
+    let shell = harness.install_fake_shell();
+    let output = harness
+        .hold(&shell, &["web", "--", "true"])
+        .output()
+        .expect("run hold");
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\r\nfoster: exit status not recorded: zmx set failed: boom\r\n"),
+        "{stdout:?}"
+    );
+    assert!(harness.shell_calls().starts_with("-l "));
+}
+
+#[test]
+fn hold_reports_permission_denied_as_126() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let shell = harness.install_fake_shell();
+    let plain = harness.home.path().join("plain-file");
+    fs::write(&plain, "x").expect("plain file");
+    let output = harness
+        .hold(&shell, &["web", "--", plain.to_str().expect("utf-8 path")])
+        .output()
+        .expect("run hold");
+    assert_eq!(output.status.code(), Some(0));
+    assert!(harness.zmx_calls().contains("exit_code=126 "));
 }
 
 #[test]

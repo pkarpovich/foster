@@ -4,7 +4,7 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use serde::Serialize;
 
-use crate::zmx::{Session, Zmx};
+use crate::zmx::{Session, Zmx, decode_word};
 
 const HEADER: [&str; 6] = ["NAME", "STATUS", "ATTACHED", "STARTED", "CWD", "COMMAND"];
 
@@ -49,9 +49,40 @@ pub fn run(args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
+fn decode_command(command: &str) -> String {
+    let mut decoded = String::new();
+    let mut token = String::new();
+    let mut quoted = false;
+    let mut characters = command.chars().chain(Some(' '));
+    while let Some(character) = characters.next() {
+        if character == '\\' && !quoted {
+            token.push(character);
+            token.extend(characters.next());
+            continue;
+        }
+        if character == ' ' && !quoted {
+            let word = decode_word(&token);
+            if !token.contains('\'') && word.chars().any(char::is_control) {
+                decoded.push_str(&format!("'{word}'"));
+            } else {
+                decoded.push_str(&word);
+            }
+            decoded.push(' ');
+            token.clear();
+            continue;
+        }
+        if character == '\'' {
+            quoted = !quoted;
+        }
+        token.push(character);
+    }
+    decoded.pop();
+    decoded
+}
+
 fn user_command(cmd: &str) -> String {
     match cmd.split_once(" -- ") {
-        Some((_, command)) => command.to_string(),
+        Some((_, command)) => decode_command(command),
         None => cmd.to_string(),
     }
 }
@@ -116,6 +147,18 @@ fn format_cwd(cwd: &Path, home: Option<&Path>) -> String {
     format!("~/{}", rest.display())
 }
 
+fn visible(text: &str) -> String {
+    let mut shown = String::new();
+    for character in text.chars() {
+        if character.is_control() {
+            shown.push_str(&character.escape_default().to_string());
+        } else {
+            shown.push(character);
+        }
+    }
+    shown
+}
+
 fn render_table(rows: &[Row], home: Option<&Path>) -> String {
     if rows.is_empty() {
         return String::new();
@@ -145,12 +188,12 @@ fn render_table(rows: &[Row], home: Option<&Path>) -> String {
             None => "-".to_string(),
         };
         cells.push([
-            name.clone(),
+            visible(name),
             status.clone(),
             attached.to_string(),
             started,
-            cwd,
-            command,
+            visible(&cwd),
+            visible(&command),
         ]);
     }
     let mut widths = [0usize; 5];
@@ -192,6 +235,30 @@ mod tests {
             cmd: cmd.map(str::to_string),
             labels,
         }
+    }
+
+    #[test]
+    fn user_command_decodes_transport_encoding() {
+        assert_eq!(
+            user_command("/x/foster hold web -- echo %2541 a%09b"),
+            "echo %41 'a\tb'"
+        );
+    }
+
+    #[test]
+    fn user_command_keeps_quoted_words_whole() {
+        assert_eq!(
+            user_command("/x/foster hold web -- sh -c 'a b%09c' x  y"),
+            "sh -c 'a b\tc' x  y"
+        );
+    }
+
+    #[test]
+    fn user_command_keeps_escaped_apostrophes() {
+        assert_eq!(
+            user_command("/x/foster hold web -- echo 'it'\\''s' later"),
+            "echo 'it'\\''s' later"
+        );
     }
 
     #[test]
@@ -288,6 +355,25 @@ mod tests {
         for line in table.lines() {
             assert_eq!(line, line.trim_end());
         }
+    }
+
+    #[test]
+    fn table_shows_control_characters_visibly() {
+        let rows = vec![Row {
+            name: "web".to_string(),
+            status: "running".to_string(),
+            exit_code: None,
+            attached: false,
+            started: None,
+            cwd: Some(PathBuf::from("/h/\x1b]52;c;x\x07")),
+            command: Some("a\tb\nc".to_string()),
+        }];
+        let table = render_table(&rows, None);
+        assert!(!table.contains('\x1b'), "{table:?}");
+        assert!(!table.contains('\x07'), "{table:?}");
+        assert_eq!(table.lines().count(), 2);
+        assert!(table.contains("/h/\\u{1b}]52;c;x\\u{7}"), "{table:?}");
+        assert!(table.ends_with("a\\tb\\nc\n"), "{table:?}");
     }
 
     #[test]

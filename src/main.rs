@@ -34,7 +34,14 @@ fn dispatch(args: &[&str]) -> Result<(), String> {
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args = Vec::new();
+    for arg in std::env::args_os().skip(1) {
+        let Ok(arg) = arg.into_string() else {
+            eprintln!("foster: arguments must be valid UTF-8");
+            return ExitCode::FAILURE;
+        };
+        args.push(arg);
+    }
     let mut words = Vec::new();
     for arg in &args {
         words.push(arg.as_str());
