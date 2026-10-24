@@ -59,3 +59,11 @@ foster rm web
 When the command exits, foster prints `foster: <command> exited with <code>` in the session and starts your login shell there. A process that exits stays listed as `exited <code>` with its last screen until you run `foster rm` or start a new `foster run` under the same name.
 
 Sessions live in `~/.local/state/foster/zmx`. Plain `zmx ls` does not see them.
+
+## Agent skill
+
+The repository is also a Claude Code plugin marketplace with one skill that teaches an agent to start servers under foster, wait until they are ready, read their output and leave the user's processes alone:
+
+```
+/plugin install foster --marketplace pkarpovich/foster
+```
