@@ -216,6 +216,19 @@ fn attach_missing_session_fails() {
 }
 
 #[test]
+fn attach_broken_session_fails() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("name=web\terr=ConnectionRefused\tstatus=cleaning up\n");
+    let output = harness.output(&["attach", "web"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "foster: session web is broken: run foster rm web\n"
+    );
+    assert_eq!(zmx_calls_without_env(&harness), vec!["ls".to_string()]);
+}
+
+#[test]
 fn attach_without_terminal_fails() {
     let harness = Harness::new();
     harness.install_fake_zmx("name=web\tpid=1\tclients=0\tcreated=1\n");

@@ -2,7 +2,7 @@ use std::io::IsTerminal;
 use std::os::unix::process::CommandExt;
 
 use crate::name::SessionName;
-use crate::zmx::Zmx;
+use crate::zmx::{Session, Zmx};
 
 pub fn run(args: &[&str]) -> Result<(), String> {
     let [name] = args else {
@@ -10,14 +10,24 @@ pub fn run(args: &[&str]) -> Result<(), String> {
     };
     let name = SessionName::parse(name)?;
     let zmx = Zmx::locate()?;
-    let mut exists = false;
+    let mut found = None;
     for session in zmx.sessions()? {
         if session.name() == name.as_str() {
-            exists = true;
+            found = Some(session);
         }
     }
-    if !exists {
+    let Some(session) = found else {
         return Err(format!("no session {}", name.as_str()));
+    };
+    match session {
+        Session::Live { .. } => {}
+        Session::Broken { name: _ } => {
+            return Err(format!(
+                "session {} is broken: run foster rm {}",
+                name.as_str(),
+                name.as_str()
+            ));
+        }
     }
     if !std::io::stdin().is_terminal() {
         return Err("attach needs a terminal".to_string());

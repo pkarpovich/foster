@@ -47,6 +47,10 @@ guard_float_h() {
   local lib_dir float_h
   lib_dir="$(zig env | sed -n 's/^ *\.lib_dir = "\(.*\)",$/\1/p')"
   float_h="$lib_dir/include/float.h"
+  if [ -z "$lib_dir" ] || [ ! -f "$float_h" ]; then
+    echo "zig float.h not found at '$float_h'" >&2
+    exit 1
+  fi
   if grep -q __need_infinity_nan "$float_h"; then
     return 0
   fi
@@ -67,7 +71,7 @@ EOF
   } >"$float_h"
 }
 
-stamp="$ZMX_REV $(patches_hash)"
+stamp="$ZMX_REV $GHOSTTY_REV $(patches_hash)"
 if [ -x "$OUT/foster-zmx" ] && [ "$(cat "$OUT/.stamp" 2>/dev/null || true)" = "$stamp" ]; then
   echo "foster-zmx is up to date"
   exit 0

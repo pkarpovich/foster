@@ -2,6 +2,7 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -43,6 +44,17 @@ fn random_marker() -> String {
     marker
 }
 
+fn run_marker() -> &'static str {
+    static MARKER: OnceLock<String> = OnceLock::new();
+    MARKER.get_or_init(|| {
+        let marker = random_marker();
+        let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+        fs::create_dir_all(&target).expect("target dir");
+        fs::write(target.join("foster-real-marker"), &marker).expect("write marker");
+        marker
+    })
+}
+
 fn short_tempdir() -> TempDir {
     tempfile::Builder::new()
         .prefix("f")
@@ -78,10 +90,7 @@ impl Real {
             longest.display()
         );
 
-        let marker = random_marker();
-        let target = manifest.join("target");
-        fs::create_dir_all(&target).expect("target dir");
-        fs::write(target.join("foster-real-marker"), &marker).expect("write marker");
+        let marker = run_marker().to_string();
 
         Real {
             home,
@@ -235,13 +244,25 @@ fn isolation() {
         String::from_utf8_lossy(&created.stderr)
     );
 
-    let listed = real.foster_stdout(&["ls"]);
+    let _cleanup = KillOther {
+        zmx: real.bin.join("foster-zmx"),
+        dir: other_dir.path().to_path_buf(),
+    };
+    assert_eq!(real.foster_stdout(&["ls"]), "");
+}
 
-    let killed = real
-        .command("foster-zmx", other_dir.path())
-        .args(["kill", "other"])
-        .output()
-        .expect("kill other session");
-    assert!(killed.status.success());
-    assert_eq!(listed, "");
+struct KillOther {
+    zmx: PathBuf,
+    dir: PathBuf,
+}
+
+impl Drop for KillOther {
+    fn drop(&mut self) {
+        let _ = Command::new(&self.zmx)
+            .env_clear()
+            .env("ZMX_DIR", &self.dir)
+            .stdin(Stdio::null())
+            .args(["kill", "other"])
+            .output();
+    }
 }

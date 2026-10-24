@@ -15,6 +15,7 @@ static TERMINATING: AtomicBool = AtomicBool::new(false);
 
 const QUOTED: &str = " \t\"'\\$`!(){}[]|&;<>?*~#\n";
 const COMMAND_NOT_FOUND: i32 = 127;
+const COMMAND_NOT_EXECUTABLE: i32 = 126;
 
 pub fn render_command(words: &[String]) -> String {
     let mut rendered = Vec::new();
@@ -79,7 +80,14 @@ pub fn run(args: &[&str]) -> Result<(), String> {
             let code = exit_code(status);
             (code, format!("{rendered} exited with {code}"))
         }
-        Err(error) => (COMMAND_NOT_FOUND, format!("{rendered}: {error}")),
+        Err(error) => {
+            let code = if error.kind() == std::io::ErrorKind::NotFound {
+                COMMAND_NOT_FOUND
+            } else {
+                COMMAND_NOT_EXECUTABLE
+            };
+            (code, format!("{rendered}: {error}"))
+        }
     };
     if TERMINATING.load(Ordering::SeqCst) {
         std::process::exit(code);
