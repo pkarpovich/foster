@@ -184,6 +184,7 @@ fn parse_line(line: &str) -> Option<Session> {
         let Some((key, value)) = field.split_once('=') else {
             continue;
         };
+        let key = key.trim_start();
         match key {
             "name" => name = Some(value.to_string()),
             "err" => broken = true,
@@ -314,6 +315,22 @@ mod tests {
                 cwd: Some(PathBuf::from("/x")),
                 cmd: Some("a -- b".to_string()),
                 labels
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_indented_line() {
+        let sessions = parse_sessions("  name=web\tclients=1\tcreated=5\n");
+        assert_eq!(
+            sessions,
+            vec![Session::Live {
+                name: "web".to_string(),
+                clients: 1,
+                created: 5,
+                cwd: None,
+                cmd: None,
+                labels: BTreeMap::new()
             }]
         );
     }
