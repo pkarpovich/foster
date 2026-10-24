@@ -189,14 +189,44 @@ fn unknown_command_prints_usage_to_stderr() {
 }
 
 #[test]
-fn unimplemented_attach_fails() {
+fn attach_without_name_prints_usage() {
     let harness = Harness::new();
+    harness.install_fake_zmx("");
     let output = harness.output(&["attach"]);
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "foster: not implemented\n"
+        "foster: usage: foster attach <name>\n"
     );
+    assert_eq!(harness.zmx_calls(), "");
+}
+
+#[test]
+fn attach_missing_session_fails() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("name=other\tpid=1\tclients=0\tcreated=1\n");
+    let output = harness.output(&["attach", "web"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "foster: no session web\n"
+    );
+    assert_eq!(zmx_calls_without_env(&harness), vec!["ls".to_string()]);
+}
+
+#[test]
+fn attach_without_terminal_fails() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("name=web\tpid=1\tclients=0\tcreated=1\n");
+    let output = harness.output(&["attach", "web"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "foster: attach needs a terminal\n"
+    );
+    assert_eq!(zmx_calls_without_env(&harness), vec!["ls".to_string()]);
 }
 
 #[test]
