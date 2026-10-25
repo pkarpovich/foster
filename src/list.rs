@@ -1,16 +1,17 @@
-use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use serde::Serialize;
 
+use crate::hold::render_command;
 use crate::output::emit;
-use crate::zmx::{Session, Zmx, decode_word};
+use crate::state::{self, Record};
+use crate::table;
+use crate::zmx::{Session, Zmx, launched_command};
 
 const HEADER: [&str; 6] = ["NAME", "STATUS", "ATTACHED", "STARTED", "CWD", "COMMAND"];
-const CWD_MIN: usize = 20;
-const COMMAND_MIN: usize = 10;
+const CWD_COLUMN: usize = 4;
 
 #[derive(Debug, PartialEq, Serialize)]
 struct Row {
@@ -39,11 +40,22 @@ pub fn run(args: &[&str]) -> Result<(), String> {
     for session in zmx.sessions()? {
         rows.push(row(session));
     }
+    for record in state::load_all()? {
+        let mut live = false;
+        for existing in &rows {
+            if existing.name == record.name {
+                live = true;
+            }
+        }
+        if !live {
+            rows.push(record_row(record));
+        }
+    }
     rows.sort_by(|left, right| left.name.cmp(&right.name));
     match format {
         Format::Table => {
             let home = std::env::var_os("HOME").map(PathBuf::from);
-            emit(render_table(&rows, home.as_deref(), terminal_width()).as_bytes());
+            emit(render_table(&rows, home.as_deref(), table::terminal_width()).as_bytes());
         }
         Format::Json => {
             let json = serde_json::to_string(&rows).map_err(|error| format!("json: {error}"))?;
@@ -51,44 +63,6 @@ pub fn run(args: &[&str]) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn decode_command(command: &str) -> String {
-    let mut decoded = String::new();
-    let mut token = String::new();
-    let mut quoted = false;
-    let mut characters = command.chars().chain(Some(' '));
-    while let Some(character) = characters.next() {
-        if character == '\\' && !quoted {
-            token.push(character);
-            token.extend(characters.next());
-            continue;
-        }
-        if character == ' ' && !quoted {
-            let word = decode_word(&token);
-            if !token.contains('\'') && word.chars().any(char::is_control) {
-                decoded.push_str(&format!("'{word}'"));
-            } else {
-                decoded.push_str(&word);
-            }
-            decoded.push(' ');
-            token.clear();
-            continue;
-        }
-        if character == '\'' {
-            quoted = !quoted;
-        }
-        token.push(character);
-    }
-    decoded.pop();
-    decoded
-}
-
-fn user_command(cmd: &str) -> String {
-    match cmd.split_once(" -- ") {
-        Some((_, command)) => decode_command(command),
-        None => cmd.to_string(),
-    }
 }
 
 fn row(session: Session) -> Row {
@@ -116,7 +90,7 @@ fn row(session: Session) -> Row {
                 None => "running".to_string(),
             };
             let exit_code = code.and_then(|code| code.parse().ok());
-            let command = cmd.map(|cmd| user_command(&cmd));
+            let command = cmd.map(|cmd| launched_command(&cmd));
             Row {
                 name,
                 status,
@@ -127,6 +101,29 @@ fn row(session: Session) -> Row {
                 command,
             }
         }
+    }
+}
+
+fn record_row(record: Record) -> Row {
+    let Record {
+        name,
+        command,
+        cwd,
+        started,
+        exit_code,
+    } = record;
+    let status = match exit_code {
+        Some(code) => format!("exited {code}"),
+        None => "stopped".to_string(),
+    };
+    Row {
+        name,
+        status,
+        exit_code: exit_code.map(i64::from),
+        attached: false,
+        started: Some(started),
+        cwd: Some(cwd),
+        command: Some(render_command(&command)),
     }
 }
 
@@ -163,66 +160,8 @@ fn visible(text: &str) -> String {
     shown
 }
 
-fn terminal_width() -> Option<usize> {
-    let stdout = std::io::stdout();
-    if !stdout.is_terminal() {
-        return None;
-    }
-    let size = rustix::termios::tcgetwinsize(&stdout).ok()?;
-    if size.ws_col == 0 {
-        return None;
-    }
-    Some(usize::from(size.ws_col))
-}
-
-fn cut_left(text: &str, width: usize) -> String {
-    let count = text.chars().count();
-    if count <= width {
-        return text.to_string();
-    }
-    let mut kept = String::from("…");
-    for character in text.chars().skip(count + 1 - width) {
-        kept.push(character);
-    }
-    kept
-}
-
-fn cut_right(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        return text.to_string();
-    }
-    let mut kept = String::new();
-    for character in text.chars().take(width - 1) {
-        kept.push(character);
-    }
-    kept.push('…');
-    kept
-}
-
-fn fit(widths: &mut [usize; 5], cells: &[[String; 6]], terminal: usize) -> Option<usize> {
-    let mut longest_command = 0;
-    for line in cells {
-        longest_command = longest_command.max(line[5].chars().count());
-    }
-    let mut fixed = 0;
-    for width in &widths[..4] {
-        fixed += width + 2;
-    }
-    let total = fixed + widths[4] + 2 + longest_command;
-    if total <= terminal {
-        return None;
-    }
-    let spare = widths[4].saturating_sub(CWD_MIN);
-    widths[4] -= (total - terminal).min(spare);
-    let room = terminal.saturating_sub(fixed + widths[4] + 2);
-    Some(room.max(COMMAND_MIN))
-}
-
 fn render_table(rows: &[Row], home: Option<&Path>, terminal: Option<usize>) -> String {
-    if rows.is_empty() {
-        return String::new();
-    }
-    let mut cells = vec![HEADER.map(str::to_string)];
+    let mut cells = Vec::new();
     for Row {
         name,
         status,
@@ -246,7 +185,7 @@ fn render_table(rows: &[Row], home: Option<&Path>, terminal: Option<usize>) -> S
             Some(command) => command.clone(),
             None => "-".to_string(),
         };
-        cells.push([
+        cells.push(vec![
             visible(name),
             status.clone(),
             attached.to_string(),
@@ -255,36 +194,7 @@ fn render_table(rows: &[Row], home: Option<&Path>, terminal: Option<usize>) -> S
             visible(&command),
         ]);
     }
-    let mut widths = [0usize; 5];
-    for line in &cells {
-        for (index, width) in widths.iter_mut().enumerate() {
-            *width = (*width).max(line[index].chars().count());
-        }
-    }
-    let command_width = match terminal {
-        Some(terminal) => fit(&mut widths, &cells, terminal),
-        None => None,
-    };
-    let mut table = String::new();
-    for line in &cells {
-        for (index, width) in widths.iter().enumerate() {
-            let cell = if index == 4 {
-                cut_left(&line[index], *width)
-            } else {
-                line[index].clone()
-            };
-            table.push_str(&cell);
-            for _ in cell.chars().count()..*width + 2 {
-                table.push(' ');
-            }
-        }
-        match command_width {
-            Some(width) => table.push_str(&cut_right(&line[5], width)),
-            None => table.push_str(&line[5]),
-        }
-        table.push('\n');
-    }
-    table
+    table::render(&HEADER, &cells, Some(CWD_COLUMN), terminal)
 }
 
 #[cfg(test)]
@@ -306,30 +216,6 @@ mod tests {
             cmd: cmd.map(str::to_string),
             labels,
         }
-    }
-
-    #[test]
-    fn user_command_decodes_transport_encoding() {
-        assert_eq!(
-            user_command("/x/foster hold web -- echo %2541 a%09b"),
-            "echo %41 'a\tb'"
-        );
-    }
-
-    #[test]
-    fn user_command_keeps_quoted_words_whole() {
-        assert_eq!(
-            user_command("/x/foster hold web -- sh -c 'a b%09c' x  y"),
-            "sh -c 'a b\tc' x  y"
-        );
-    }
-
-    #[test]
-    fn user_command_keeps_escaped_apostrophes() {
-        assert_eq!(
-            user_command("/x/foster hold web -- echo 'it'\\''s' later"),
-            "echo 'it'\\''s' later"
-        );
     }
 
     #[test]
@@ -448,6 +334,27 @@ mod tests {
     }
 
     #[test]
+    fn record_without_session_is_stopped_or_exited() {
+        let record = Record {
+            name: "web".to_string(),
+            command: vec!["sh".to_string(), "-c".to_string(), "pnpm dev".to_string()],
+            cwd: PathBuf::from("/p"),
+            started: 5,
+            exit_code: None,
+        };
+        let stopped = record_row(record.clone());
+        assert_eq!(stopped.status, "stopped");
+        assert_eq!(stopped.command, Some("sh -c 'pnpm dev'".to_string()));
+        assert!(!stopped.attached);
+        let exited = record_row(Record {
+            exit_code: Some(3),
+            ..record
+        });
+        assert_eq!(exited.status, "exited 3");
+        assert_eq!(exited.exit_code, Some(3));
+    }
+
+    #[test]
     fn started_has_minute_precision() {
         assert_eq!(format_started(1792866550).len(), "2026-10-24 18:29".len());
     }
@@ -464,22 +371,6 @@ mod tests {
             )),
             command: Some("mise exec -- pnpm dev".to_string()),
         }
-    }
-
-    #[test]
-    fn cut_keeps_short_text() {
-        assert_eq!(cut_left("abc", 3), "abc");
-        assert_eq!(cut_right("abc", 3), "abc");
-    }
-
-    #[test]
-    fn cut_left_keeps_the_tail() {
-        assert_eq!(cut_left("/a/b/services/app", 8), "…ces/app");
-    }
-
-    #[test]
-    fn cut_right_keeps_the_head() {
-        assert_eq!(cut_right("mise exec -- pnpm dev", 10), "mise exec…");
     }
 
     #[test]

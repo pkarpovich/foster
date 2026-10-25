@@ -6,8 +6,11 @@ mod list;
 mod name;
 mod output;
 mod proxy;
+mod restore;
 mod rm;
 mod run;
+mod state;
+mod table;
 mod task;
 mod zmx;
 
@@ -18,6 +21,7 @@ const USAGE: &str = "usage:
   foster history <name> [-f]          print a process's output, -f keeps following
   foster tail <name>                  stream a process's new output
   foster rm <name>                    stop a process and remove it
+  foster restore                      start again what was running before a reboot
   foster task [<name> | --json]       list or start a task from .zed/tasks.json";
 
 fn dispatch(args: &[&str]) -> Result<(), String> {
@@ -32,6 +36,7 @@ fn dispatch(args: &[&str]) -> Result<(), String> {
         }
         ["hold", rest @ ..] => hold::run(rest),
         ["rm", rest @ ..] => rm::run(rest),
+        ["restore", rest @ ..] => restore::run(rest),
         ["run", rest @ ..] => run::run(rest),
         ["ls", rest @ ..] => list::run(rest),
         ["attach", rest @ ..] => attach::run(rest),

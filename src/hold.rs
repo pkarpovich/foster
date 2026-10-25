@@ -9,7 +9,8 @@ use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
 use signal_hook::low_level::register;
 
 use crate::name::SessionName;
-use crate::zmx::{Zmx, clean_env, decode_word};
+use crate::state;
+use crate::zmx::{Zmx, clean_env};
 
 static TERMINATING: AtomicBool = AtomicBool::new(false);
 
@@ -70,9 +71,9 @@ pub fn run(args: &[&str]) -> Result<(), String> {
     };
     let name = SessionName::parse(name)?;
     install_handlers()?;
-    let mut words = vec![decode_word(program)];
+    let mut words = vec![program.to_string()];
     for word in rest {
-        words.push(decode_word(word));
+        words.push(word.to_string());
     }
     let rendered = render_command(&words);
     let (code, line) = match Command::new(&words[0])
@@ -104,6 +105,7 @@ pub fn run(args: &[&str]) -> Result<(), String> {
         ("ended", ended.to_string()),
     ];
     let recorded = Zmx::locate().and_then(|zmx| zmx.set_labels(&name, &labels));
+    let _ = state::mark_exited(&name, code);
     let mut stdout = std::io::stdout();
     let _ = write!(stdout, "\r\nfoster: {line}\r\n");
     if let Err(error) = recorded {

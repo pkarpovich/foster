@@ -1,4 +1,5 @@
 use crate::name::SessionName;
+use crate::state;
 use crate::zmx::Zmx;
 
 pub fn run(args: &[&str]) -> Result<(), String> {
@@ -14,10 +15,13 @@ pub fn run(args: &[&str]) -> Result<(), String> {
             found = Some(session.kill_mode());
         }
     }
-    let Some(mode) = found else {
+    if let Some(mode) = found {
+        zmx.kill(&name, mode)?;
+    }
+    let had_record = state::remove(&name)?;
+    if found.is_none() && !had_record {
         return Err(format!("no session {}", name.as_str()));
-    };
-    zmx.kill(&name, mode)?;
+    }
     println!("removed {}", name.as_str());
     Ok(())
 }

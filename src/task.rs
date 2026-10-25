@@ -7,10 +7,13 @@ use serde::{Deserialize, Serialize};
 use crate::hold::render_command;
 use crate::output::emit;
 use crate::run;
+use crate::table;
 
 const TASKS_FILE: &str = ".zed/tasks.json";
 const WORKTREE_ROOT: &str = "ZED_WORKTREE_ROOT";
 const MAIN_WORKTREE: &str = "ZED_MAIN_GIT_WORKTREE";
+const TASK_SHELL: &str = "/bin/sh";
+const HEADER: [&str; 3] = ["NAME", "LABEL", "COMMAND"];
 
 #[derive(Deserialize)]
 struct ZedTask {
@@ -77,45 +80,13 @@ fn list(resolved: &[Resolved], format: Format) -> Result<(), String> {
                     Some(variable) => format!("{} (needs Zed: ${variable})", entry.label),
                     None => entry.label.clone(),
                 };
-                lines.push([entry.name.clone(), label, entry.command.clone()]);
+                lines.push(vec![entry.name.clone(), label, entry.command.clone()]);
             }
-            emit(render(&lines).as_bytes());
+            let table = table::render(&HEADER, &lines, None, table::terminal_width());
+            emit(table.as_bytes());
         }
     }
     Ok(())
-}
-
-fn render(lines: &[[String; 3]]) -> String {
-    if lines.is_empty() {
-        return String::new();
-    }
-    let mut widths = [4usize, 5usize];
-    for line in lines {
-        widths[0] = widths[0].max(line[0].chars().count());
-        widths[1] = widths[1].max(line[1].chars().count());
-    }
-    let mut table = String::new();
-    let header = [
-        "NAME".to_string(),
-        "LABEL".to_string(),
-        "COMMAND".to_string(),
-    ];
-    push_line(&mut table, &header, widths);
-    for line in lines {
-        push_line(&mut table, line, widths);
-    }
-    table
-}
-
-fn push_line(table: &mut String, line: &[String; 3], widths: [usize; 2]) {
-    for index in 0..2 {
-        table.push_str(&line[index]);
-        for _ in line[index].chars().count()..widths[index] + 2 {
-            table.push(' ');
-        }
-    }
-    table.push_str(&line[2]);
-    table.push('\n');
 }
 
 fn text_of(characters: &[char]) -> String {
@@ -171,22 +142,7 @@ fn locate() -> Result<Project, String> {
             return Ok(Project { root, main, repo });
         }
     }
-    let mut dir = cwd.as_path();
-    loop {
-        if dir.join(TASKS_FILE).is_file() {
-            let root = dir.to_path_buf();
-            let repo = repo_name(&root);
-            return Ok(Project {
-                main: root.clone(),
-                root,
-                repo,
-            });
-        }
-        let Some(parent) = dir.parent() else {
-            return Err(format!("no {TASKS_FILE} in this project"));
-        };
-        dir = parent;
-    }
+    Err(format!("no {TASKS_FILE} in this project"))
 }
 
 fn git(cwd: &Path, args: &[&str]) -> Option<String> {
@@ -306,10 +262,9 @@ fn expand(text: &str, project: &Project) -> Result<String, String> {
 }
 
 fn resolve_all(project: &Project, tasks: Vec<ZedTask>) -> Result<Vec<Resolved>, String> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let mut resolved: Vec<Resolved> = Vec::new();
     for task in tasks {
-        let next = resolve(project, task, &shell);
+        let next = resolve(project, task);
         for existing in &resolved {
             if existing.entry.name == next.entry.name {
                 return Err(format!(
@@ -323,7 +278,7 @@ fn resolve_all(project: &Project, tasks: Vec<ZedTask>) -> Result<Vec<Resolved>, 
     Ok(resolved)
 }
 
-fn resolve(project: &Project, task: ZedTask, shell: &str) -> Resolved {
+fn resolve(project: &Project, task: ZedTask) -> Resolved {
     let ZedTask {
         label,
         command,
@@ -360,7 +315,7 @@ fn resolve(project: &Project, task: ZedTask, shell: &str) -> Resolved {
             argv.push(format!("{key}={}", expand_or_note(value)));
         }
     }
-    argv.push(shell.to_string());
+    argv.push(TASK_SHELL.to_string());
     argv.push("-c".to_string());
     argv.push(line.clone());
     Resolved {
@@ -448,11 +403,7 @@ mod tests {
         ]"#;
         let tasks: Vec<ZedTask> = json5::from_str(text).expect("parse");
         assert_eq!(tasks.len(), 1);
-        let resolved = resolve(
-            &project(),
-            tasks.into_iter().next().expect("task"),
-            "/bin/sh",
-        );
+        let resolved = resolve(&project(), tasks.into_iter().next().expect("task"));
         assert_eq!(resolved.entry.name, "repo:web");
         assert_eq!(resolved.entry.cwd, "/w/repo-feature/web");
         assert_eq!(resolved.entry.needs, None);
@@ -471,7 +422,7 @@ mod tests {
             cwd: None,
             env: BTreeMap::new(),
         };
-        let resolved = resolve(&project(), task, "/bin/sh");
+        let resolved = resolve(&project(), task);
         assert_eq!(resolved.entry.command, "go run ./cmd --chat 'two words'");
         assert_eq!(resolved.entry.cwd, "/w/repo-feature");
     }

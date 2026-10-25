@@ -88,30 +88,17 @@ impl Session {
         }
     }
 
-    pub fn matches_launch(&self, command: &str, cwd: &Path) -> bool {
+    pub fn launched(&self) -> Option<String> {
         match self {
             Session::Live {
                 name: _,
                 clients: _,
                 created: _,
-                cwd: Some(session_cwd),
-                cmd: Some(cmd),
-                labels: _,
-            } => {
-                let Some((_, launched)) = cmd.split_once(" -- ") else {
-                    return false;
-                };
-                launched == command && session_cwd == cwd
-            }
-            Session::Live {
-                name: _,
-                clients: _,
-                created: _,
                 cwd: _,
-                cmd: _,
+                cmd,
                 labels: _,
-            } => false,
-            Session::Broken { name: _ } => false,
+            } => cmd.as_deref().map(launched_command),
+            Session::Broken { name: _ } => None,
         }
     }
 
@@ -217,30 +204,11 @@ fn percent_decode(text: &str) -> Vec<u8> {
     decoded
 }
 
-pub fn encode_word(word: &str) -> String {
-    let characters: Vec<char> = word.chars().collect();
-    let mut encoded = String::new();
-    for (index, &character) in characters.iter().enumerate() {
-        let hex_follows = characters
-            .get(index + 1)
-            .is_some_and(char::is_ascii_hexdigit)
-            && characters
-                .get(index + 2)
-                .is_some_and(char::is_ascii_hexdigit);
-        if character.is_control() || (character == '%' && hex_follows) {
-            let mut buffer = [0u8; 4];
-            for byte in character.encode_utf8(&mut buffer).bytes() {
-                encoded.push_str(&format!("%{byte:02X}"));
-            }
-        } else {
-            encoded.push(character);
-        }
+pub fn launched_command(cmd: &str) -> String {
+    match cmd.split_once(" -- ") {
+        Some((_, command)) => command.to_string(),
+        None => cmd.to_string(),
     }
-    encoded
-}
-
-pub fn decode_word(word: &str) -> String {
-    String::from_utf8_lossy(&percent_decode(word)).into_owned()
 }
 
 fn decode_cwd(uri: &str) -> Option<PathBuf> {
@@ -397,9 +365,18 @@ impl Zmx {
         Ok(file)
     }
 
-    pub fn create_detached(&self, name: &SessionName, argv: &[String]) -> Result<(), String> {
+    pub fn create_detached(
+        &self,
+        name: &SessionName,
+        argv: &[String],
+        cwd: &Path,
+    ) -> Result<(), String> {
         let mut command = self.command();
-        command.arg("attach").arg(name.as_str()).args(argv);
+        command
+            .arg("attach")
+            .arg(name.as_str())
+            .args(argv)
+            .current_dir(cwd);
         self.run("attach", command)?;
         Ok(())
     }
@@ -565,29 +542,6 @@ mod tests {
         assert_eq!(labels.get("exit_code").map(String::as_str), Some("3"));
         assert_eq!(labels.get("ended").map(String::as_str), Some("1792870000"));
         assert!(!session.is_running());
-    }
-
-    #[test]
-    fn encodes_control_characters_and_ambiguous_percent() {
-        assert_eq!(encode_word("plain %s 100%"), "plain %s 100%");
-        assert_eq!(encode_word("a\tb\nc\x1b"), "a%09b%0Ac%1B");
-        assert_eq!(encode_word("%41 %4"), "%2541 %4");
-        assert_eq!(encode_word("é"), "é");
-    }
-
-    #[test]
-    fn word_round_trips() {
-        for word in [
-            "",
-            "a\tb",
-            "%09",
-            "%0\t9",
-            "x\u{7f}%4f\r\n",
-            "100%",
-            "é\u{85}",
-        ] {
-            assert_eq!(decode_word(&encode_word(word)), word);
-        }
     }
 
     #[test]

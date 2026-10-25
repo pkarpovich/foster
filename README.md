@@ -23,7 +23,7 @@ Start a command and attach to it:
 foster run web -- pnpm dev
 ```
 
-A name has 1 to 50 characters: letters, digits, `-`, `_`, `.` and `:`. Running `foster run` again with the same name, command and directory attaches to the process that is already running, so a Zed task or a script can call it repeatedly. The same name with a different command or directory is refused; run `foster rm` first.
+A name has 1 to 50 characters: letters, digits, `-`, `_`, `.` and `:`. A running process is identified by its name alone: `foster run` with a name that is already running attaches to it (or, without a terminal, prints `already running <name>: <command>`), whatever command you pass, so a Zed task or a script can call it repeatedly. To change the command of a running process, `foster rm` it first. Command words cannot contain control characters such as tabs or newlines.
 
 Without a terminal (a script, an agent, a dropped ssh link) the command starts detached and foster prints `started web`.
 
@@ -50,7 +50,7 @@ foster history web -f
 foster tail web
 ```
 
-Start a task the project already defines for Zed. foster reads `.zed/tasks.json` at the root of the git checkout (or the nearest parent folder that has one), names each task `<repository>:<label as a slug>`, and starts it like `foster run` with the task's `command` and `args` through `$SHELL -c`, its `cwd` and its `env`. `$ZED_WORKTREE_ROOT` and `$ZED_MAIN_GIT_WORKTREE` are filled in; a task that needs any other editor variable (`$ZED_FILE`, `$ZED_STEM`, ...) without a default is listed but refused. The repository name comes from git, so every worktree of a repository uses the same names:
+Start a task the project already defines for Zed. foster reads `.zed/tasks.json` at the root of the git checkout, names each task `<repository>:<label as a slug>`, and starts it like `foster run` with the task's `command` and `args` through `/bin/sh -c` (the same for every caller), its `cwd` and its `env`. `$ZED_WORKTREE_ROOT` and `$ZED_MAIN_GIT_WORKTREE` are filled in; a task that needs any other editor variable (`$ZED_FILE`, `$ZED_STEM`, ...) without a default is listed but refused. The repository name comes from git, so every worktree of a repository uses the same names:
 
 ```
 foster task                     # list: name, Zed label, command
@@ -58,7 +58,15 @@ foster task --json              # the same as JSON
 foster task web-dev             # start <repository>:web-dev, the task labelled "web: dev"
 ```
 
-Stop a process and remove its record:
+A reboot ends every session: the zmx daemons live in memory. foster keeps one record per process in `~/.local/state/foster/sessions/` (name, command, directory, start time, and the exit code once the command ends on its own), so after a reboot `foster ls` shows what was running as `stopped`, and one command brings all of it back:
+
+```
+foster restore                  # start every stopped process again, detached
+```
+
+`restore` skips processes that exited before the reboot and names already running. It starts each one in its recorded directory with the environment of the terminal you call it from; inherited variables are not stored, so put anything a process needs into its command (`env FOO=bar ...`) or the Zed task's `env`.
+
+Stop a process and remove its record, so `restore` no longer starts it:
 
 ```
 foster rm web

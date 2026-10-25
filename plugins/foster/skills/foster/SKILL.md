@@ -6,8 +6,9 @@ description: >
   watcher, worker or any command that keeps running (pnpm dev, vite, go run ./cmd/server, cargo watch,
   docker compose up in the foreground) to outlive your turn or your session, instead of `&`, `nohup`,
   `run_in_background` or a tmux window. Also use it when the user asks whether something is running,
-  wants the output or error of a server that was started earlier, or asks to stop or restart one,
-  and whenever `foster ls`, `foster run`, `foster task`, `foster history`, a project's `.zed/tasks.json` or a foster session name like
+  wants the output or error of a server that was started earlier, asks to stop or restart one,
+  or wants their processes back after a reboot,
+  and whenever `foster ls`, `foster run`, `foster task`, `foster history`, `foster restore`, a project's `.zed/tasks.json` or a foster session name like
   `project:service` comes up. Skip it for commands that finish on their own (tests, builds, one-off scripts).
 ---
 
@@ -26,10 +27,11 @@ tell the user and fall back to whatever they normally use.
 | Command | What it does | Agent use |
 |---|---|---|
 | `foster run <name> -- <command...>` | Start the command in the current directory. With a terminal it attaches; without one it prints `started <name>` and returns. | Yes |
-| `foster ls --json` | One JSON array: `name`, `status` (`running`, `exited <code>`, `error`), `exit_code`, `attached`, `started` (epoch seconds), `cwd`, `command`. | Yes |
+| `foster ls --json` | One JSON array: `name`, `status` (`running`, `exited <code>`, `stopped`, `error`), `exit_code`, `attached`, `started` (epoch seconds), `cwd`, `command`. | Yes |
 | `foster history <name>` | Scrollback and screen as plain text, then exit. | Yes |
 | `foster history <name> -f` | The same, then keeps streaming new output until killed. | Only under a timeout |
 | `foster tail <name>` | Streams only new output, escape codes included, until killed. | Only under a timeout |
+| `foster restore` | Start again every process that was running before a reboot (`stopped` in `ls`). | Ask first |
 | `foster rm <name>` | Stops the process and removes its record. | See "Stopping" |
 | `foster task [<name> \| --json]` | List the project's `.zed/tasks.json` tasks, or start one like `run`. | Yes |
 | `foster attach <name>` | Interactive attach for a human. Needs a terminal and fails without one. | No |
@@ -46,8 +48,11 @@ named them and they carry the right directory and environment.
   and `needs` (an editor variable such as `ZED_STEM` that makes the task Zed-only, else null).
 - `foster task <name>` starts one exactly like `foster run`; the short slug (`web-dev`) or the full name (`myrepo:web-dev`)
   both work. A task with `needs` set cannot run outside Zed; say so instead of rewriting it.
-- The repository part comes from git, so the main checkout and every worktree share names, and running
-  the same task from a second worktree is refused while the first runs.
+- The repository part comes from git, so the main checkout and every worktree share names. Starting the
+  same task from a second worktree attaches to the one already running; check its `cwd` in `foster ls --json`
+  before assuming which checkout it serves.
+- Task commands run through `/bin/sh -c`, whoever calls foster, so they behave the same from an agent,
+  a terminal or Zed.
 
 ## Starting a process
 
@@ -59,10 +64,12 @@ named them and they carry the right directory and environment.
 - The command is an argv list, not a shell line. Pipes, `&&`, redirects and globs need a shell:
   `foster run api -- sh -c 'make migrate && ./bin/api'`. Set variables with `env`:
   `foster run web -- env PORT=5173 pnpm dev`.
-- Running the same name again is safe. The same command from the same directory while it runs prints
-  `already running <name>` and exits 0, so you can call it unconditionally. A different command or
-  directory under a running name fails with `<name> is already running a different command`. An exited
-  or broken session under that name is replaced.
+- Running the same name again is safe: a running session is identified by its name alone. Without a terminal
+  `foster run` then prints `already running <name>: <command>` and exits 0, so you can call it
+  unconditionally. It does not compare commands: if the printed command is not the one you meant, the name
+  is taken by something else. Report it, or `foster rm` it only if it is yours. An exited or broken session
+  under that name is replaced.
+- Command words cannot contain control characters (tabs, newlines); put such text in a `sh -c` script.
 - The process inherits your environment minus Claude Code's session markers, so a `claude` started under
   foster behaves like one started from a plain terminal.
 
@@ -92,6 +99,10 @@ If you stream with `history -f` or `tail` instead, always bound it, because neit
   session then holds a login shell, and its history keeps the last screen and a line
   `foster: <command> exited with <code>`.
 - `error` means the session daemon does not answer; it can only be removed with `foster rm`.
+
+## After a reboot
+
+Sessions do not survive a reboot, but their records do. `foster ls --json` then reports what was running as `status: "stopped"`. `foster restore` starts all of them again, detached, each in its recorded directory, and skips the ones that exited before or are running already. It is the user's call: run it when they ask to bring things back, or ask before running it yourself, since it starts every stopped process at once. A `stopped` entry that should stay down is removed with `foster rm <name>`.
 
 ## Stopping
 

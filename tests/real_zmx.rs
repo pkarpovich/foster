@@ -208,14 +208,11 @@ fn acceptance() {
     let boom = real.ls_entry("boom").expect("boom is listed");
     assert_eq!(boom["status"], "running");
 
-    let duplicate = real.foster(&["run", "web", "--", "true"]);
-    assert!(!duplicate.status.success());
+    let joined = real.foster_stdout(&["run", "web", "--", "true"]);
     assert_eq!(
-        String::from_utf8_lossy(&duplicate.stderr),
-        "foster: web is already running a different command\n"
+        joined,
+        format!("already running web: sh -c '{web_script}'\n")
     );
-    let joined = real.foster_stdout(&["run", "web", "--", "sh", "-c", &web_script]);
-    assert_eq!(joined, "already running web\n");
 
     assert_eq!(real.foster_stdout(&["rm", "web"]), "removed web\n");
     assert_eq!(real.foster_stdout(&["rm", "boom"]), "removed boom\n");
@@ -223,6 +220,50 @@ fn acceptance() {
     poll_until(timeout, interval, || {
         processes_with(&real.marker).is_empty()
     });
+}
+
+#[test]
+fn restore_after_the_daemon_is_gone() {
+    let real = Real::new(vec!["svc"]);
+    let timeout = Duration::from_secs(10);
+    let interval = Duration::from_millis(100);
+    let cwd = std::env::current_dir().expect("current dir");
+    let started = real.foster_stdout(&["run", "svc", "--", "sh", "-c", "echo up; sleep 300"]);
+    assert_eq!(started, "started svc\n");
+
+    let killed = real
+        .command("foster-zmx", &real.zmx_dir)
+        .args(["kill", "svc"])
+        .output()
+        .expect("kill the daemon like a reboot would");
+    assert!(
+        killed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&killed.stderr)
+    );
+    poll_until(timeout, interval, || {
+        real.ls_entry("svc")
+            .is_some_and(|entry| entry["status"] == "stopped")
+    });
+
+    assert_eq!(real.foster_stdout(&["restore"]), "restored svc\n");
+    poll_until(timeout, interval, || {
+        real.ls_entry("svc")
+            .is_some_and(|entry| entry["status"] == "running")
+    });
+    let entry = real.ls_entry("svc").expect("svc is listed");
+    assert_eq!(entry["cwd"], cwd.to_str().expect("utf-8 cwd"));
+    assert_eq!(entry["command"], "sh -c 'echo up; sleep 300'");
+    poll_until(timeout, interval, || {
+        real.foster_stdout(&["history", "svc"]).contains("up")
+    });
+
+    assert_eq!(
+        real.foster_stdout(&["restore"]),
+        "skipped svc: already running\n"
+    );
+    assert_eq!(real.foster_stdout(&["rm", "svc"]), "removed svc\n");
+    assert_eq!(real.foster_stdout(&["ls"]), "");
 }
 
 #[test]

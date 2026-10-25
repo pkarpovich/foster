@@ -16,6 +16,7 @@ const USAGE: &str = "usage:
   foster history <name> [-f]          print a process's output, -f keeps following
   foster tail <name>                  stream a process's new output
   foster rm <name>                    stop a process and remove it
+  foster restore                      start again what was running before a reboot
   foster task [<name> | --json]       list or start a task from .zed/tasks.json
 ";
 
@@ -456,6 +457,161 @@ fn task_reports_an_unknown_name_and_a_missing_file() {
     );
 }
 
+fn record_path(harness: &Harness, name: &str) -> PathBuf {
+    harness
+        .home
+        .path()
+        .join(".local/state/foster/sessions")
+        .join(format!("{name}.json"))
+}
+
+fn write_record(
+    harness: &Harness,
+    name: &str,
+    command: &[&str],
+    cwd: &Path,
+    exit_code: Option<i32>,
+) {
+    let path = record_path(harness, name);
+    fs::create_dir_all(path.parent().expect("sessions dir")).expect("create sessions dir");
+    let record = serde_json::json!({
+        "name": name,
+        "command": command,
+        "cwd": cwd,
+        "started": 1,
+        "exit_code": exit_code,
+    });
+    fs::write(path, record.to_string()).expect("write record");
+}
+
+#[test]
+fn run_records_the_session_on_disk() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let cwd = harness.home.path().canonicalize().expect("canonical home");
+    let output = harness
+        .foster(&["run", "web", "--", "pnpm", "dev"])
+        .current_dir(&cwd)
+        .output()
+        .expect("run foster");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let text = fs::read_to_string(record_path(&harness, "web")).expect("record");
+    let record: serde_json::Value = serde_json::from_str(&text).expect("json record");
+    assert_eq!(record["command"], serde_json::json!(["pnpm", "dev"]));
+    assert_eq!(record["cwd"], serde_json::json!(cwd));
+    assert_eq!(record["exit_code"], serde_json::Value::Null);
+}
+
+#[test]
+fn rm_removes_the_record_even_without_a_session() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    write_record(&harness, "web", &["pnpm", "dev"], harness.home.path(), None);
+    let output = harness.output(&["rm", "web"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "removed web\n");
+    assert!(!record_path(&harness, "web").exists());
+    assert_eq!(zmx_calls_without_env(&harness), vec!["ls".to_string()]);
+}
+
+#[test]
+fn hold_marks_the_record_exited() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let shell = harness.install_fake_shell();
+    write_record(
+        &harness,
+        "web",
+        &["sh", "-c", "exit 3"],
+        harness.home.path(),
+        None,
+    );
+    let output = harness
+        .hold(&shell, &["web", "--", "sh", "-c", "exit 3"])
+        .output()
+        .expect("run hold");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let text = fs::read_to_string(record_path(&harness, "web")).expect("record");
+    let record: serde_json::Value = serde_json::from_str(&text).expect("json record");
+    assert_eq!(record["exit_code"], serde_json::json!(3));
+}
+
+#[test]
+fn restore_starts_stopped_records_and_skips_the_rest() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("name=api\tpid=1\tclients=0\tcreated=1\n");
+    fs::create_dir_all(harness.home.path().join("web")).expect("web dir");
+    let web_dir = harness
+        .home
+        .path()
+        .join("web")
+        .canonicalize()
+        .expect("canonical web");
+    write_record(&harness, "web", &["pnpm", "dev"], &web_dir, None);
+    write_record(
+        &harness,
+        "api",
+        &["go", "run", "."],
+        harness.home.path(),
+        None,
+    );
+    write_record(&harness, "old", &["true"], harness.home.path(), Some(1));
+    let output = harness.output(&["restore"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "skipped api: already running\nrestored web\n"
+    );
+    let calls = zmx_calls_without_env(&harness);
+    let mut attaches = Vec::new();
+    for call in &calls {
+        if call.starts_with("attach") {
+            attaches.push(call.clone());
+        }
+    }
+    assert_eq!(
+        attaches,
+        vec![format!("attach web {} hold web -- pnpm dev", foster_path())]
+    );
+    assert_eq!(
+        harness.attach_details(),
+        format!("cwd={} managed=unset\n", web_dir.display())
+    );
+}
+
+#[test]
+fn restore_reports_a_missing_directory() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    write_record(
+        &harness,
+        "web",
+        &["pnpm", "dev"],
+        Path::new("/nonexistent/foster/dir"),
+        None,
+    );
+    let output = harness.output(&["restore"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("web: directory /nonexistent/foster/dir is gone"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("1 not restored"), "{stderr}");
+}
+
+#[test]
+fn ls_shows_records_without_a_session_as_stopped() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    write_record(&harness, "web", &["pnpm", "dev"], Path::new("/p"), None);
+    let output = harness.output(&["ls", "--json"]);
+    let rows: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(rows[0]["name"], "web");
+    assert_eq!(rows[0]["status"], "stopped");
+    assert_eq!(rows[0]["command"], "pnpm dev");
+}
+
 #[test]
 fn attach_without_name_prints_usage() {
     let harness = Harness::new();
@@ -682,19 +838,32 @@ fn run_starts_detached_session_without_terminal() {
 }
 
 #[test]
-fn run_encodes_control_characters_for_hold() {
+fn run_rejects_control_characters_in_the_command() {
     let harness = Harness::new();
     harness.install_fake_zmx("");
-    let output = harness.output(&["run", "web", "--", "echo", "a\tb\nc", "%41"]);
-    assert_eq!(output.status.code(), Some(0));
-    let expected = vec![
-        "ls".to_string(),
-        format!(
-            "attach web {} hold web -- echo a%09b%0Ac %2541",
-            foster_path()
-        ),
-    ];
-    assert_eq!(zmx_calls_without_env(&harness), expected);
+    let output = harness.output(&["run", "web", "--", "echo", "a\tb"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("has a control character"),
+        "{output:?}"
+    );
+    assert_eq!(harness.zmx_calls(), "");
+}
+
+#[test]
+fn run_joins_a_running_session_by_name_alone() {
+    let harness = Harness::new();
+    harness.install_fake_zmx(
+        "name=web\tpid=1\tclients=0\tcreated=1\tcwd=file://host/elsewhere\tcmd=/x/foster hold web -- pnpm dev\n",
+    );
+    let output = harness.output(&["run", "web", "--", "pnpm", "build"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "already running web: pnpm dev\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    assert_eq!(zmx_calls_without_env(&harness), vec!["ls".to_string()]);
 }
 
 #[test]
@@ -718,70 +887,6 @@ fn run_waits_for_the_name_lock() {
         run.try_wait().expect("try_wait").is_some()
     });
     assert!(harness.zmx_calls().contains("attach web"));
-}
-
-#[test]
-fn run_refuses_running_duplicate_with_another_command() {
-    let harness = Harness::new();
-    let cwd = harness.home.path().canonicalize().expect("canonical home");
-    harness.install_fake_zmx(&format!(
-        "name=web\tpid=1\tclients=0\tcreated=1\tcwd=file://host{}\tcmd=/x/foster hold web -- pnpm dev\n",
-        cwd.display()
-    ));
-    let output = harness
-        .foster(&["run", "web", "--", "pnpm", "build"])
-        .current_dir(&cwd)
-        .output()
-        .expect("run foster");
-    assert_eq!(output.status.code(), Some(1));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
-        "foster: web is already running a different command\n"
-    );
-    assert_eq!(zmx_calls_without_env(&harness), vec!["ls".to_string()]);
-}
-
-#[test]
-fn run_refuses_running_duplicate_from_another_directory() {
-    let harness = Harness::new();
-    let cwd = harness.home.path().canonicalize().expect("canonical home");
-    harness.install_fake_zmx(
-        "name=web\tpid=1\tclients=0\tcreated=1\tcwd=file://host/elsewhere\tcmd=/x/foster hold web -- pnpm dev\n",
-    );
-    let output = harness
-        .foster(&["run", "web", "--", "pnpm", "dev"])
-        .current_dir(&cwd)
-        .output()
-        .expect("run foster");
-    assert_eq!(output.status.code(), Some(1));
-    assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
-        "foster: web is already running a different command\n"
-    );
-    assert_eq!(zmx_calls_without_env(&harness), vec!["ls".to_string()]);
-}
-
-#[test]
-fn run_joins_running_duplicate_with_the_same_command() {
-    let harness = Harness::new();
-    let cwd = harness.home.path().canonicalize().expect("canonical home");
-    harness.install_fake_zmx(&format!(
-        "name=web\tpid=1\tclients=0\tcreated=1\tcwd=file://host{}\tcmd=/x/foster hold web -- sh -c 'echo ready; sleep 300'\n",
-        cwd.display()
-    ));
-    let output = harness
-        .foster(&["run", "web", "--", "sh", "-c", "echo ready; sleep 300"])
-        .current_dir(&cwd)
-        .output()
-        .expect("run foster");
-    assert_eq!(output.status.code(), Some(0));
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "already running web\n"
-    );
-    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
-    assert_eq!(zmx_calls_without_env(&harness), vec!["ls".to_string()]);
 }
 
 #[test]
@@ -886,29 +991,6 @@ fn hold_records_exit_code_and_runs_shell() {
     assert!(digits.parse::<u64>().is_ok(), "{digits:?}");
     let cwd = harness.home.path().canonicalize().expect("canonical home");
     assert_eq!(harness.shell_calls(), format!("-l cwd={}\n", cwd.display()));
-}
-
-#[test]
-fn hold_decodes_encoded_words() {
-    let harness = Harness::new();
-    harness.install_fake_zmx("");
-    let shell = harness.install_fake_shell();
-    let output = harness
-        .hold(
-            &shell,
-            &[
-                "web",
-                "--",
-                "sh",
-                "-c",
-                "test \"$0\" = \"a\tb%2541\"",
-                "a%09b%2541",
-            ],
-        )
-        .output()
-        .expect("run hold");
-    assert_eq!(output.status.code(), Some(0));
-    assert!(harness.zmx_calls().starts_with("set web exit_code=0 "));
 }
 
 #[test]
