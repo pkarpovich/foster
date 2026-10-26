@@ -4,9 +4,26 @@ foster is one entry point for long-running processes on one machine. `foster run
 
 foster does not own PTYs. It drives `foster-zmx`, a build of [zmx](https://github.com/neurosnap/zmx) (MIT) with the explicit-leadership patches from [agterm](https://github.com/umputun/agterm) (MIT, see `zmx/patches/NOTICE`), so the terminal that attaches takes the PTY size at once.
 
+## Install
+
+Apple Silicon Macs:
+
+```
+brew install pkarpovich/apps/foster
+```
+
+The formula installs `foster` and `foster-zmx` side by side.
+
+Linux on x86_64: static binaries from the latest release, `~/.local/bin` must be on `PATH`:
+
+```
+mkdir -p ~/.local/bin
+curl -fsSL https://github.com/pkarpovich/foster/releases/latest/download/foster-x86_64-unknown-linux-musl.tar.gz | tar -xz -C ~/.local/bin foster foster-zmx
+```
+
 ## Build
 
-Requires macOS, mise, git and network access. `zmx/build.sh` fetches zmx and ghostty at pinned revisions and builds them with the zig version from `mise.toml`. On macOS it also patches `include/float.h` in that zig install once to work around a macOS SDK build failure, and keeps the original as `float.h.orig`.
+Requires macOS or Linux, mise, git and network access. `zmx/build.sh` fetches zmx and ghostty at pinned revisions and builds them with the zig version from `mise.toml`, as a static musl binary on Linux. On macOS it also patches `include/float.h` in that zig install once to work around a macOS SDK build failure, and keeps the original as `float.h.orig`.
 
 ```
 mise install

@@ -71,7 +71,12 @@ EOF
   } >"$float_h"
 }
 
-stamp="$ZMX_REV $GHOSTTY_REV $(patches_hash)"
+zig_target() {
+  [ "$(uname -s)" = Linux ] || return 0
+  echo "-Dtarget=$(uname -m)-linux-musl"
+}
+
+stamp="$ZMX_REV $GHOSTTY_REV $(patches_hash) $(zig_target)"
 if [ -x "$OUT/foster-zmx" ] && [ "$(cat "$OUT/.stamp" 2>/dev/null || true)" = "$stamp" ]; then
   echo "foster-zmx is up to date"
   exit 0
@@ -90,7 +95,7 @@ apply "$BUILD/zmx" "${PATCHES[2]}"
 
 guard_float_h
 
-(cd "$BUILD/zmx" && zig build -Doptimize=ReleaseSafe)
+(cd "$BUILD/zmx" && zig build -Doptimize=ReleaseSafe $(zig_target))
 
 install -m 0755 "$BUILD/zmx/zig-out/bin/zmx" "$OUT/foster-zmx"
 cp "$BUILD/zmx/LICENSE" "$OUT/LICENSE"
