@@ -1,0 +1,24 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "foster",
+  "owner": {
+    "name": "Pavel Karpovich"
+  },
+  "metadata": {
+    "description": "The foster agent skill: start, inspect and stop long-running processes that survive the session."
+  },
+  "plugins": [
+    {
+      "name": "foster",
+      "source": "./plugins/foster",
+      "description": "Run dev servers and other long-running processes under foster so they outlive the agent session, and read their output without a terminal.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Pavel Karpovich"
+      },
+      "repository": "https://github.com/pkarpovich/foster",
+      "category": "productivity",
+      "keywords": ["foster", "process", "dev-server", "pty", "zmx"]
+    }
+  ]
+}
