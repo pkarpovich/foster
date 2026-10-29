@@ -1,12 +1,15 @@
 # foster
 
+[![CI](https://github.com/pkarpovich/foster/actions/workflows/ci.yml/badge.svg)](https://github.com/pkarpovich/foster/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 foster is one entry point for long-running processes on one machine. `foster run` starts a command in a persistent PTY session and attaches you to it. The process keeps running after you detach or your ssh link drops. `foster ls` lists every process started this way, and `foster attach` reconnects from any terminal.
 
 foster does not own PTYs. It drives `foster-zmx`, a build of [zmx](https://github.com/neurosnap/zmx) (MIT) with the explicit-leadership patches from [agterm](https://github.com/umputun/agterm) (MIT, see `zmx/patches/NOTICE`), so the terminal that attaches takes the PTY size at once.
 
 ## Install
 
-Apple Silicon Macs:
+Homebrew on Apple Silicon Macs and on x86_64 Linux:
 
 ```
 brew install pkarpovich/apps/foster
@@ -14,7 +17,7 @@ brew install pkarpovich/apps/foster
 
 The formula installs `foster` and `foster-zmx` side by side.
 
-Linux on x86_64: static binaries from the latest release, `~/.local/bin` must be on `PATH`:
+Linux on x86_64 without Homebrew: static binaries from the latest release, `~/.local/bin` must be on `PATH`:
 
 ```
 mkdir -p ~/.local/bin
