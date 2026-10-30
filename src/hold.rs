@@ -9,6 +9,7 @@ use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
 use signal_hook::low_level::register;
 
 use crate::name::SessionName;
+use crate::route::{self, Event};
 use crate::state;
 use crate::zmx::{Zmx, clean_env};
 
@@ -76,11 +77,20 @@ pub fn run(args: &[&str]) -> Result<(), String> {
         words.push(word.to_string());
     }
     let rendered = render_command(&words);
-    let (code, line) = match Command::new(&words[0])
-        .args(&words[1..])
-        .env_remove("ZMX_DIR")
-        .status()
-    {
+    let (domain, port) = match state::load(&name) {
+        Ok(Some(record)) => (record.domain, record.port),
+        Ok(None) | Err(_) => (None, None),
+    };
+    let mut child = Command::new(&words[0]);
+    child.args(&words[1..]).env_remove("ZMX_DIR");
+    if let Some(port) = port {
+        child.env("PORT", port.to_string());
+    }
+    if let Some(domain) = &domain {
+        child.env("FOSTER_DOMAIN", domain);
+    }
+    route::run_hook(Event::Start, name.as_str(), domain.as_deref(), port);
+    let (code, line) = match child.status() {
         Ok(status) => {
             let code = exit_code(status);
             (code, format!("{rendered} exited with {code}"))
@@ -106,6 +116,7 @@ pub fn run(args: &[&str]) -> Result<(), String> {
     ];
     let recorded = Zmx::locate().and_then(|zmx| zmx.set_labels(&name, &labels));
     let _ = state::mark_exited(&name, code);
+    route::run_hook(Event::Exit, name.as_str(), domain.as_deref(), port);
     let mut stdout = std::io::stdout();
     let _ = write!(stdout, "\r\nfoster: {line}\r\n");
     if let Err(error) = recorded {

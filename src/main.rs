@@ -8,6 +8,7 @@ mod output;
 mod proxy;
 mod restore;
 mod rm;
+mod route;
 mod run;
 mod state;
 mod table;

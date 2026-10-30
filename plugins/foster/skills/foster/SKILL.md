@@ -26,8 +26,8 @@ tell the user and fall back to whatever they normally use.
 
 | Command | What it does | Agent use |
 |---|---|---|
-| `foster run <name> -- <command...>` | Start the command in the current directory. With a terminal it attaches; without one it prints `started <name>` and returns. | Yes |
-| `foster ls --json` | One JSON array: `name`, `status` (`running`, `exited <code>`, `stopped`, `error`), `exit_code`, `attached`, `started` (epoch seconds), `cwd`, `command`. | Yes |
+| `foster run <name> -- <command...>` | Start the command in the current directory. With a terminal it attaches; without one it prints `started <name> on https://<domain> (port <port>)` and returns. | Yes |
+| `foster ls --json` | One JSON array: `name`, `status` (`running`, `exited <code>`, `stopped`, `error`), `exit_code`, `attached`, `started` (epoch seconds), `cwd`, `command`, `domain`, `port`. | Yes |
 | `foster history <name>` | Scrollback and screen as plain text, then exit. | Yes |
 | `foster history <name> -f` | The same, then keeps streaming new output until killed. | Only under a timeout |
 | `foster tail <name>` | Streams only new output, escape codes included, until killed. | Only under a timeout |
@@ -44,13 +44,15 @@ Your Bash tool has no terminal, so `foster run` always takes the detached path f
 If the project has `.zed/tasks.json`, prefer its tasks over writing the command yourself: the user already
 named them and they carry the right directory and environment.
 
-- `foster task --json` lists them: `name` (`<repository>:<label slug>`), `label`, `command`, `cwd`,
+- `foster task --json` lists them: `name` (`<repository>:<label slug>`), `label`, `domain`, `command`, `cwd`,
   and `needs` (an editor variable such as `ZED_STEM` that makes the task Zed-only, else null).
 - `foster task <name>` starts one exactly like `foster run`; the short slug (`web-dev`) or the full name (`myrepo:web-dev`)
   both work. A task with `needs` set cannot run outside Zed; say so instead of rewriting it.
-- The repository part comes from git, so the main checkout and every worktree share names. Starting the
-  same task from a second worktree attaches to the one already running; check its `cwd` in `foster ls --json`
-  before assuming which checkout it serves.
+- The repository part comes from git. A linked worktree adds its folder to the name and the domain
+  (`myrepo:feat-x:web-dev` on `feat-x.web-dev.localhost`), so starting a task there runs that worktree's
+  code instead of attaching to the main checkout's process.
+- `FOSTER_DOMAIN` in a task's `env` names its domain (`yotei` gives `yotei.localhost`); foster removes it
+  from the command's environment and passes the final domain.
 - Task commands run through `/bin/sh -c`, whoever calls foster, so they behave the same from an agent,
   a terminal or Zed.
 
@@ -70,6 +72,10 @@ named them and they carry the right directory and environment.
   is taken by something else. Report it, or `foster rm` it only if it is yours. An exited or broken session
   under that name is replaced.
 - Command words cannot contain control characters (tabs, newlines); put such text in a `sh -c` script.
+- Every process gets a free port from 51000-51999 as `PORT` and a domain as `FOSTER_DOMAIN`
+  (the last part of the name plus `.localhost`). The service should listen on `$PORT`: a port set by hand
+  (`env PORT=5173`, a hard-coded `--port`) overrides it, and the domain then points at nothing.
+  `foster ls --json` shows both. Two running processes cannot share a domain: foster refuses the second.
 - The process inherits your environment minus Claude Code's session markers, so a `claude` started under
   foster behaves like one started from a plain terminal.
 

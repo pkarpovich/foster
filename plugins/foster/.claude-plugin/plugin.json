@@ -1,6 +1,6 @@
 {
   "name": "foster",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Run dev servers and other long-running processes under foster so they outlive the agent session, and read their output without a terminal.",
   "author": {
     "name": "Pavel Karpovich"

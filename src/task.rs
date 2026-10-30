@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::hold::render_command;
 use crate::output::emit;
+use crate::route;
 use crate::run;
 use crate::table;
 
@@ -13,7 +14,8 @@ const TASKS_FILE: &str = ".zed/tasks.json";
 const WORKTREE_ROOT: &str = "ZED_WORKTREE_ROOT";
 const MAIN_WORKTREE: &str = "ZED_MAIN_GIT_WORKTREE";
 const TASK_SHELL: &str = "/bin/sh";
-const HEADER: [&str; 3] = ["NAME", "LABEL", "COMMAND"];
+const DOMAIN_VARIABLE: &str = "FOSTER_DOMAIN";
+const HEADER: [&str; 4] = ["NAME", "LABEL", "DOMAIN", "COMMAND"];
 
 #[derive(Deserialize)]
 struct ZedTask {
@@ -30,12 +32,14 @@ struct Project {
     root: PathBuf,
     main: PathBuf,
     repo: String,
+    worktree: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Serialize)]
 struct Entry {
     name: String,
     label: String,
+    domain: String,
     command: String,
     cwd: String,
     needs: Option<String>,
@@ -80,7 +84,12 @@ fn list(resolved: &[Resolved], format: Format) -> Result<(), String> {
                     Some(variable) => format!("{} (needs Zed: ${variable})", entry.label),
                     None => entry.label.clone(),
                 };
-                lines.push(vec![entry.name.clone(), label, entry.command.clone()]);
+                lines.push(vec![
+                    entry.name.clone(),
+                    label,
+                    entry.domain.clone(),
+                    entry.command.clone(),
+                ]);
             }
             let table = table::render(&HEADER, &lines, None, table::terminal_width());
             emit(table.as_bytes());
@@ -98,7 +107,7 @@ fn text_of(characters: &[char]) -> String {
 }
 
 fn start(project: &Project, resolved: Vec<Resolved>, name: &str) -> Result<(), String> {
-    let wanted = qualified(&project.repo, name);
+    let wanted = qualified(project, name);
     let mut found = None;
     for Resolved { entry, argv } in resolved {
         if entry.name == wanted || entry.name == name {
@@ -115,11 +124,7 @@ fn start(project: &Project, resolved: Vec<Resolved>, name: &str) -> Result<(), S
         return Err(format!("task \"{}\" needs Zed (${variable})", entry.label));
     }
     std::env::set_current_dir(&entry.cwd).map_err(|error| format!("cd {}: {error}", entry.cwd))?;
-    let mut words = vec![entry.name.as_str(), "--"];
-    for word in &argv {
-        words.push(word.as_str());
-    }
-    run::run(&words)
+    run::start(&entry.name, argv, entry.domain)
 }
 
 fn locate() -> Result<Project, String> {
@@ -139,7 +144,17 @@ fn locate() -> Result<Project, String> {
         };
         if root.join(TASKS_FILE).is_file() {
             let repo = repo_name(&main);
-            return Ok(Project { root, main, repo });
+            let worktree = if root == main {
+                None
+            } else {
+                Some(route::label(&repo_name(&root)))
+            };
+            return Ok(Project {
+                root,
+                main,
+                repo,
+                worktree,
+            });
         }
     }
     Err(format!("no {TASKS_FILE} in this project"))
@@ -197,8 +212,11 @@ fn slug(label: &str) -> String {
     slug.trim_matches('-').to_string()
 }
 
-fn qualified(repo: &str, name: &str) -> String {
-    format!("{repo}:{name}")
+fn qualified(project: &Project, name: &str) -> String {
+    match &project.worktree {
+        Some(worktree) => format!("{}:{worktree}:{name}", project.repo),
+        None => format!("{}:{name}", project.repo),
+    }
 }
 
 fn expand(text: &str, project: &Project) -> Result<String, String> {
@@ -264,7 +282,7 @@ fn expand(text: &str, project: &Project) -> Result<String, String> {
 fn resolve_all(project: &Project, tasks: Vec<ZedTask>) -> Result<Vec<Resolved>, String> {
     let mut resolved: Vec<Resolved> = Vec::new();
     for task in tasks {
-        let next = resolve(project, task);
+        let next = resolve(project, task)?;
         for existing in &resolved {
             if existing.entry.name == next.entry.name {
                 return Err(format!(
@@ -278,7 +296,7 @@ fn resolve_all(project: &Project, tasks: Vec<ZedTask>) -> Result<Vec<Resolved>, 
     Ok(resolved)
 }
 
-fn resolve(project: &Project, task: ZedTask) -> Resolved {
+fn resolve(project: &Project, task: ZedTask) -> Result<Resolved, String> {
     let ZedTask {
         label,
         command,
@@ -286,7 +304,8 @@ fn resolve(project: &Project, task: ZedTask) -> Resolved {
         cwd,
         env,
     } = task;
-    let name = qualified(&project.repo, &slug(&label));
+    let slug = slug(&label);
+    let name = qualified(project, &slug);
     let mut needs = None;
     let mut expand_or_note = |text: &str| match expand(text, project) {
         Ok(text) => text,
@@ -308,26 +327,37 @@ fn resolve(project: &Project, task: ZedTask) -> Resolved {
         Some(cwd) => expand_or_note(&cwd),
         None => project.root.display().to_string(),
     };
-    let mut argv = Vec::new();
-    if !env.is_empty() {
-        argv.push("env".to_string());
-        for (key, value) in &env {
-            argv.push(format!("{key}={}", expand_or_note(value)));
+    let mut base = slug;
+    let mut assignments = Vec::new();
+    for (key, value) in &env {
+        let value = expand_or_note(value);
+        if key == DOMAIN_VARIABLE {
+            base = value;
+        } else {
+            assignments.push(format!("{key}={value}"));
         }
+    }
+    let domain = route::domain(&base, project.worktree.as_deref())
+        .map_err(|error| format!("task \"{label}\": {error}"))?;
+    let mut argv = Vec::new();
+    if !assignments.is_empty() {
+        argv.push("env".to_string());
+        argv.extend(assignments);
     }
     argv.push(TASK_SHELL.to_string());
     argv.push("-c".to_string());
     argv.push(line.clone());
-    Resolved {
+    Ok(Resolved {
         entry: Entry {
             name,
             label,
+            domain,
             command: line,
             cwd,
             needs,
         },
         argv,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -336,9 +366,19 @@ mod tests {
 
     fn project() -> Project {
         Project {
-            root: PathBuf::from("/w/repo-feature"),
+            root: PathBuf::from("/r/repo"),
             main: PathBuf::from("/r/repo"),
             repo: "repo".to_string(),
+            worktree: None,
+        }
+    }
+
+    fn worktree_project() -> Project {
+        Project {
+            root: PathBuf::from("/w/feat-x"),
+            main: PathBuf::from("/r/repo"),
+            repo: "repo".to_string(),
+            worktree: Some("feat-x".to_string()),
         }
     }
 
@@ -354,10 +394,10 @@ mod tests {
 
     #[test]
     fn expands_known_zed_variables_in_both_forms() {
-        let project = project();
+        let project = worktree_project();
         assert_eq!(
             expand("$ZED_WORKTREE_ROOT/app", &project),
-            Ok("/w/repo-feature/app".to_string())
+            Ok("/w/feat-x/app".to_string())
         );
         assert_eq!(
             expand("${ZED_MAIN_GIT_WORKTREE}/x", &project),
@@ -403,9 +443,11 @@ mod tests {
         ]"#;
         let tasks: Vec<ZedTask> = json5::from_str(text).expect("parse");
         assert_eq!(tasks.len(), 1);
-        let resolved = resolve(&project(), tasks.into_iter().next().expect("task"));
+        let resolved =
+            resolve(&project(), tasks.into_iter().next().expect("task")).expect("resolve");
         assert_eq!(resolved.entry.name, "repo:web");
-        assert_eq!(resolved.entry.cwd, "/w/repo-feature/web");
+        assert_eq!(resolved.entry.domain, "web.localhost");
+        assert_eq!(resolved.entry.cwd, "/r/repo/web");
         assert_eq!(resolved.entry.needs, None);
         assert_eq!(
             resolved.argv,
@@ -422,9 +464,46 @@ mod tests {
             cwd: None,
             env: BTreeMap::new(),
         };
-        let resolved = resolve(&project(), task);
+        let resolved = resolve(&project(), task).expect("resolve");
         assert_eq!(resolved.entry.command, "go run ./cmd --chat 'two words'");
-        assert_eq!(resolved.entry.cwd, "/w/repo-feature");
+        assert_eq!(resolved.entry.cwd, "/r/repo");
+    }
+
+    fn served(label: &str, env: &[(&str, &str)]) -> ZedTask {
+        let mut map = BTreeMap::new();
+        for (key, value) in env {
+            map.insert(key.to_string(), value.to_string());
+        }
+        ZedTask {
+            label: label.to_string(),
+            command: "pnpm dev".to_string(),
+            args: Vec::new(),
+            cwd: None,
+            env: map,
+        }
+    }
+
+    #[test]
+    fn a_linked_worktree_gets_its_own_name_and_domain() {
+        let resolved = resolve(&worktree_project(), served("yotei-app", &[])).expect("resolve");
+        assert_eq!(resolved.entry.name, "repo:feat-x:yotei-app");
+        assert_eq!(resolved.entry.domain, "feat-x.yotei-app.localhost");
+        assert_eq!(resolved.entry.cwd, "/w/feat-x");
+    }
+
+    #[test]
+    fn foster_domain_names_the_domain_and_stays_out_of_the_command_env() {
+        let task = served("yotei-app", &[("FOSTER_DOMAIN", "yotei"), ("MODE", "dev")]);
+        let main = resolve(&project(), task).expect("resolve");
+        assert_eq!(main.entry.domain, "yotei.localhost");
+        assert_eq!(
+            main.argv,
+            vec!["env", "MODE=dev", "/bin/sh", "-c", "pnpm dev"]
+        );
+        let task = served("yotei-app", &[("FOSTER_DOMAIN", "yotei.localhost")]);
+        let linked = resolve(&worktree_project(), task).expect("resolve");
+        assert_eq!(linked.entry.domain, "feat-x.yotei.localhost");
+        assert_eq!(linked.argv, vec!["/bin/sh", "-c", "pnpm dev"]);
     }
 
     #[test]
