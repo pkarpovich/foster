@@ -10,8 +10,10 @@ use crate::state::{self, Record};
 use crate::table;
 use crate::zmx::{Session, Zmx, launched_command};
 
-const HEADER: [&str; 6] = ["NAME", "STATUS", "ATTACHED", "STARTED", "CWD", "COMMAND"];
-const CWD_COLUMN: usize = 4;
+const HEADER: [&str; 8] = [
+    "NAME", "STATUS", "ATTACHED", "STARTED", "DOMAIN", "PORT", "CWD", "COMMAND",
+];
+const CWD_COLUMN: usize = 6;
 
 #[derive(Debug, PartialEq, Serialize)]
 struct Row {
@@ -22,6 +24,8 @@ struct Row {
     started: Option<i64>,
     cwd: Option<PathBuf>,
     command: Option<String>,
+    domain: Option<String>,
+    port: Option<u16>,
 }
 
 enum Format {
@@ -36,11 +40,19 @@ pub fn run(args: &[&str]) -> Result<(), String> {
         _ => return Err("usage: foster ls [--json]".to_string()),
     };
     let zmx = Zmx::locate()?;
+    let records = state::load_all()?;
     let mut rows = Vec::new();
     for session in zmx.sessions()? {
-        rows.push(row(session));
+        let mut row = row(session);
+        for record in &records {
+            if record.name == row.name {
+                row.domain.clone_from(&record.domain);
+                row.port = record.port;
+            }
+        }
+        rows.push(row);
     }
-    for record in state::load_all()? {
+    for record in records {
         let mut live = false;
         for existing in &rows {
             if existing.name == record.name {
@@ -75,6 +87,8 @@ fn row(session: Session) -> Row {
             started: None,
             cwd: None,
             command: None,
+            domain: None,
+            port: None,
         },
         Session::Live {
             name,
@@ -99,6 +113,8 @@ fn row(session: Session) -> Row {
                 started: Some(created),
                 cwd,
                 command,
+                domain: None,
+                port: None,
             }
         }
     }
@@ -111,6 +127,8 @@ fn record_row(record: Record) -> Row {
         cwd,
         started,
         exit_code,
+        domain,
+        port,
     } = record;
     let status = match exit_code {
         Some(code) => format!("exited {code}"),
@@ -124,6 +142,8 @@ fn record_row(record: Record) -> Row {
         started: Some(started),
         cwd: Some(cwd),
         command: Some(render_command(&command)),
+        domain,
+        port,
     }
 }
 
@@ -170,6 +190,8 @@ fn render_table(rows: &[Row], home: Option<&Path>, terminal: Option<usize>) -> S
         started,
         cwd,
         command,
+        domain,
+        port,
     } in rows
     {
         let attached = if *attached { "yes" } else { "no" };
@@ -185,11 +207,21 @@ fn render_table(rows: &[Row], home: Option<&Path>, terminal: Option<usize>) -> S
             Some(command) => command.clone(),
             None => "-".to_string(),
         };
+        let domain = match domain {
+            Some(domain) => domain.clone(),
+            None => "-".to_string(),
+        };
+        let port = match port {
+            Some(port) => port.to_string(),
+            None => "-".to_string(),
+        };
         cells.push(vec![
             visible(name),
             status.clone(),
             attached.to_string(),
             started,
+            visible(&domain),
+            port,
             visible(&cwd),
             visible(&command),
         ]);
@@ -235,6 +267,8 @@ mod tests {
                 started: Some(1792866550),
                 cwd: Some(PathBuf::from("/p")),
                 command: Some("sh -c 'a -- b'".to_string()),
+                domain: None,
+                port: None,
             }
         );
     }
@@ -262,6 +296,8 @@ mod tests {
                 started: None,
                 cwd: None,
                 command: None,
+                domain: None,
+                port: None,
             }
         );
     }
@@ -293,6 +329,8 @@ mod tests {
                 started: None,
                 cwd: Some(PathBuf::from("/h/p")),
                 command: Some("pnpm dev".to_string()),
+                domain: Some("web.localhost".to_string()),
+                port: Some(51000),
             },
             Row {
                 name: "bad".to_string(),
@@ -302,11 +340,13 @@ mod tests {
                 started: None,
                 cwd: None,
                 command: None,
+                domain: None,
+                port: None,
             },
         ];
-        let expected = "NAME  STATUS   ATTACHED  STARTED  CWD  COMMAND\n\
-                        web   running  no        -        ~/p  pnpm dev\n\
-                        bad   error    no        -        -    -\n";
+        let expected = "NAME  STATUS   ATTACHED  STARTED  DOMAIN         PORT   CWD  COMMAND\n\
+                        web   running  no        -        web.localhost  51000  ~/p  pnpm dev\n\
+                        bad   error    no        -        -              -      -    -\n";
         let table = render_table(&rows, Some(Path::new("/h")), None);
         assert_eq!(table, expected);
         for line in table.lines() {
@@ -324,6 +364,8 @@ mod tests {
             started: None,
             cwd: Some(PathBuf::from("/h/\x1b]52;c;x\x07")),
             command: Some("a\tb\nc".to_string()),
+            domain: None,
+            port: None,
         }];
         let table = render_table(&rows, None, None);
         assert!(!table.contains('\x1b'), "{table:?}");
@@ -341,6 +383,8 @@ mod tests {
             cwd: PathBuf::from("/p"),
             started: 5,
             exit_code: None,
+            domain: None,
+            port: None,
         };
         let stopped = record_row(record.clone());
         assert_eq!(stopped.status, "stopped");
@@ -370,18 +414,20 @@ mod tests {
                 "/h/Projects/worktrees/turtle-hub/fix-yotei-app-sheet-mermaid/services/yotei-app",
             )),
             command: Some("mise exec -- pnpm dev".to_string()),
+            domain: Some("yotei.localhost".to_string()),
+            port: Some(51004),
         }
     }
 
     #[test]
     fn table_fits_the_terminal_by_cutting_cwd_first() {
-        let table = render_table(&[wide_row()], Some(Path::new("/h")), Some(110));
-        let expected = "NAME                  STATUS   ATTACHED  STARTED  CWD                                    COMMAND\n\
-                        turtle-hub:yotei-app  running  yes       -        …app-sheet-mermaid/services/yotei-app  mise exec -- pnpm dev\n";
+        let table = render_table(&[wide_row()], Some(Path::new("/h")), Some(130));
+        let expected = "NAME                  STATUS   ATTACHED  STARTED  DOMAIN           PORT   CWD                                COMMAND\n\
+                        turtle-hub:yotei-app  running  yes       -        yotei.localhost  51004  …sheet-mermaid/services/yotei-app  mise exec -- pnpm dev\n";
         assert_eq!(table, expected);
         assert_eq!(
             table.lines().nth(1).unwrap_or_default().chars().count(),
-            110
+            130
         );
     }
 

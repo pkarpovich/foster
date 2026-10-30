@@ -12,6 +12,10 @@ pub struct Record {
     pub cwd: PathBuf,
     pub started: i64,
     pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub domain: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
 }
 
 pub fn now() -> i64 {

@@ -8,7 +8,7 @@ A process registry for one machine over a patched zmx. README.md says what it do
 - `src/run.rs`, `task.rs`, `attach.rs`, `list.rs`, `output.rs` (history, tail), `restore.rs`, `rm.rs` - one file per command.
 - `src/hold.rs` - `foster hold`, the process inside the PTY: runs the command, forwards SIGHUP and SIGTERM to its group, records the exit code, then execs a login shell.
 - `src/proxy.rs` - the attach proxy: raw mode, the cover on the follower, takeover, detach on Ctrl+C.
-- `src/zmx.rs` - everything that talks to `foster-zmx`. `src/state.rs` - the records on disk. `src/table.rs` - the table for `ls` and `task`. `src/name.rs` - `SessionName`.
+- `src/zmx.rs` - everything that talks to `foster-zmx`. `src/state.rs` - the records on disk. `src/route.rs` - domains, ports and the hook. `src/table.rs` - the table for `ls` and `task`. `src/name.rs` - `SessionName`.
 - `zmx/` - `build.sh` and the vendored patches. `plugins/foster/` - the Claude Code plugin with the agent skill.
 
 ## Commands
@@ -30,6 +30,9 @@ claude plugin validate .
 ## Invariants
 
 - A session is identified by its name alone. `run` and `task` on a running name attach, or without a terminal print `already running <name>: <command>` and exit 0. Never compare commands: zmx caps the `cmd` and `cwd` fields of `ls` at 256 bytes and cuts them with `...`.
+- A task from a linked worktree is named `<repo>:<worktree>:<slug>` and its domain gets the worktree in front, so worktrees never share a session.
+- Every session gets a port from 51000-51999 and a domain, both stored in its record. `hold` passes them to the command as `PORT` and `FOSTER_DOMAIN`, so `restore` keeps them. Two records without an exit code cannot share a domain.
+- foster never talks to a proxy. It runs `~/.config/foster/hook` on start and exit (from `hold`) and after `rm`. A failing hook only warns.
 - zmx label values accept only `[a-zA-Z0-9-_.]`, so a label cannot carry a path or a command. Those live in the record.
 - Records in `~/.local/state/foster/sessions/<name>.json` are written through a temp file and a rename. `hold` marks a record exited, `rm` removes it, `restore` starts the records without an exit code.
 - Task commands run through `/bin/sh -c`, never `$SHELL`, so a task behaves the same whoever calls foster.

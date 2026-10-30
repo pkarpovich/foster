@@ -374,9 +374,9 @@ fn task_lists_the_zed_tasks() {
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "NAME                      LABEL                                     COMMAND\n\
-         myrepo:web-dev            web: dev                                  pnpm dev\n\
-         myrepo:test-current-file  test current file (needs Zed: $ZED_STEM)  go test -run $ZED_STEM\n"
+        "NAME                      LABEL                                     DOMAIN                       COMMAND\n\
+         myrepo:web-dev            web: dev                                  web-dev.localhost            pnpm dev\n\
+         myrepo:test-current-file  test current file (needs Zed: $ZED_STEM)  test-current-file.localhost  go test -run $ZED_STEM\n"
     );
 }
 
@@ -393,10 +393,8 @@ fn task_starts_through_run_in_the_task_directory() {
         .output()
         .expect("run foster");
     assert_eq!(output.status.code(), Some(0), "{output:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "started myrepo:web-dev\n"
-    );
+    let (domain, _) = started(&output, "myrepo:web-dev");
+    assert_eq!(domain, "web-dev.localhost");
     let expected = vec![
         "ls".to_string(),
         format!(
@@ -409,6 +407,48 @@ fn task_starts_through_run_in_the_task_directory() {
         harness.attach_details(),
         format!("cwd={} managed=unset\n", repo.join("web").display())
     );
+}
+
+fn git(repo: &Path, args: &[&str]) {
+    let status = Command::new("/usr/bin/git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+        .args(args)
+        .current_dir(repo)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("git");
+    assert!(status.success(), "git {args:?}");
+}
+
+#[test]
+fn task_in_a_linked_worktree_gets_its_own_name_and_domain() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let repo = task_project(&harness, TASKS);
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let worktree = repo.parent().expect("parent").join("feat-x");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feat-x",
+            worktree.to_str().expect("utf-8"),
+        ],
+    );
+    let output = harness
+        .foster(&["task", "--json"])
+        .current_dir(&worktree)
+        .output()
+        .expect("run foster");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let tasks: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(tasks[0]["name"], "myrepo:feat-x:web-dev");
+    assert_eq!(tasks[0]["domain"], "feat-x.web-dev.localhost");
 }
 
 #[test]
@@ -495,11 +535,143 @@ fn run_records_the_session_on_disk() {
         .output()
         .expect("run foster");
     assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let (domain, port) = started(&output, "web");
     let text = fs::read_to_string(record_path(&harness, "web")).expect("record");
     let record: serde_json::Value = serde_json::from_str(&text).expect("json record");
     assert_eq!(record["command"], serde_json::json!(["pnpm", "dev"]));
     assert_eq!(record["cwd"], serde_json::json!(cwd));
     assert_eq!(record["exit_code"], serde_json::Value::Null);
+    assert_eq!(record["domain"], serde_json::json!(domain));
+    assert_eq!(record["port"], serde_json::json!(port));
+}
+
+fn write_routed_record(harness: &Harness, name: &str, cwd: &Path, domain: &str, port: u16) {
+    let path = record_path(harness, name);
+    fs::create_dir_all(path.parent().expect("sessions dir")).expect("create sessions dir");
+    let record = serde_json::json!({
+        "name": name,
+        "command": ["true"],
+        "cwd": cwd,
+        "started": 1,
+        "exit_code": null,
+        "domain": domain,
+        "port": port,
+    });
+    fs::write(path, record.to_string()).expect("write record");
+}
+
+fn install_hook(harness: &Harness, exit: i32) -> PathBuf {
+    let dir = harness.home.path().join(".config/foster");
+    fs::create_dir_all(&dir).expect("hook dir");
+    let log = harness.home.path().join("hook.log");
+    let script = format!(
+        "#!/bin/sh\necho \"$FOSTER_EVENT $FOSTER_NAME $FOSTER_DOMAIN $FOSTER_PORT\" >> '{}'\necho hook-said-no >&2\nexit {exit}\n",
+        log.display()
+    );
+    let path = dir.join("hook");
+    fs::write(&path, script).expect("hook");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+    log
+}
+
+fn free_port() -> u16 {
+    for port in (51500..=51999).rev() {
+        if std::net::TcpListener::bind(("0.0.0.0", port)).is_ok() {
+            return port;
+        }
+    }
+    panic!("no free port in 51500-51999");
+}
+
+#[test]
+fn run_refuses_a_domain_another_session_owns() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    write_routed_record(
+        &harness,
+        "other:web",
+        harness.home.path(),
+        "web.localhost",
+        51999,
+    );
+    let output = harness.output(&["run", "web", "--", "true"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "foster: domain web.localhost belongs to other:web: set FOSTER_DOMAIN in the task or foster rm other:web\n"
+    );
+    assert_eq!(zmx_calls_without_env(&harness), vec!["ls".to_string()]);
+}
+
+#[test]
+fn hold_gives_the_command_its_port_and_domain() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let shell = harness.install_fake_shell();
+    write_routed_record(&harness, "web", harness.home.path(), "web.localhost", 51234);
+    let seen = harness.home.path().join("seen");
+    let script = format!("echo \"$PORT $FOSTER_DOMAIN\" > '{}'", seen.display());
+    let output = harness
+        .hold(&shell, &["web", "--", "sh", "-c", &script])
+        .output()
+        .expect("run hold");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(&seen).expect("seen"),
+        "51234 web.localhost\n"
+    );
+}
+
+#[test]
+fn hold_runs_the_hook_on_start_and_exit() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let shell = harness.install_fake_shell();
+    let log = install_hook(&harness, 0);
+    write_routed_record(&harness, "web", harness.home.path(), "web.localhost", 51234);
+    let output = harness
+        .hold(&shell, &["web", "--", "true"])
+        .output()
+        .expect("run hold");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(&log).expect("hook log"),
+        "start web web.localhost 51234\nexit web web.localhost 51234\n"
+    );
+}
+
+#[test]
+fn rm_runs_the_hook_and_a_failing_hook_only_warns() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let log = install_hook(&harness, 3);
+    write_routed_record(&harness, "web", harness.home.path(), "web.localhost", 51234);
+    let output = harness.output(&["rm", "web"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "removed web\n");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.starts_with("foster: hook ") && stderr.contains("hook-said-no"),
+        "{stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(&log).expect("hook log"),
+        "rm web web.localhost 51234\n"
+    );
+}
+
+#[test]
+fn restore_keeps_a_free_port() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let port = free_port();
+    write_routed_record(&harness, "web", harness.home.path(), "web.localhost", port);
+    let output = harness.output(&["restore"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let text = fs::read_to_string(record_path(&harness, "web")).expect("record");
+    let record: serde_json::Value = serde_json::from_str(&text).expect("json record");
+    assert_eq!(record["port"], serde_json::json!(port));
+    assert_eq!(record["domain"], "web.localhost");
 }
 
 #[test]
@@ -802,6 +974,17 @@ fn foster_path() -> String {
         .to_string()
 }
 
+fn started(output: &Output, name: &str) -> (String, u16) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let prefix = format!("started {name} on https://");
+    let rest = stdout
+        .strip_prefix(&prefix)
+        .unwrap_or_else(|| panic!("{stdout:?} starts with {prefix:?}"));
+    let (domain, port) = rest.split_once(" (port ").expect("port part");
+    let port = port.strip_suffix(")\n").expect("closing paren");
+    (domain.to_string(), port.parse().expect("numeric port"))
+}
+
 fn zmx_calls_without_env(harness: &Harness) -> Vec<String> {
     let mut calls = Vec::new();
     for line in harness.zmx_calls().lines() {
@@ -824,7 +1007,9 @@ fn run_starts_detached_session_without_terminal() {
         .output()
         .expect("run foster");
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "started web\n");
+    let (domain, port) = started(&output, "web");
+    assert_eq!(domain, "web.localhost");
+    assert!((51000..=51999).contains(&port), "{port}");
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
     let expected = vec![
         "ls".to_string(),
@@ -895,7 +1080,7 @@ fn run_replaces_exited_session() {
     harness.install_fake_zmx("name=web\tpid=1\tclients=0\tcreated=1\tended=5\texit_code=3\n");
     let output = harness.output(&["run", "web", "--", "true"]);
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "started web\n");
+    started(&output, "web");
     let expected = vec![
         "ls".to_string(),
         "kill web".to_string(),
@@ -910,7 +1095,7 @@ fn run_replaces_broken_session() {
     harness.install_fake_zmx("name=web\terr=ConnectionRefused\tstatus=cleaning up\n");
     let output = harness.output(&["run", "web", "--", "true"]);
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "started web\n");
+    started(&output, "web");
     let expected = vec![
         "ls".to_string(),
         "kill web --force".to_string(),
@@ -1149,10 +1334,10 @@ fn ls_prints_table() {
     let harness = Harness::new();
     let output = ls_output(&harness, &["ls"]);
     assert_eq!(output.status.code(), Some(0));
-    let expected = "NAME  STATUS    ATTACHED  STARTED           CWD        COMMAND\n\
-bad   error     no        -                 -          -\n\
-boom  exited 3  no        2026-10-24 18:30  /opt/x     sh -c 'exit 3'\n\
-web   running   yes       2026-10-24 18:29  ~/my proj  sh -c 'echo ready; sleep 300'\n";
+    let expected = "NAME  STATUS    ATTACHED  STARTED           DOMAIN  PORT  CWD        COMMAND\n\
+bad   error     no        -                 -       -     -          -\n\
+boom  exited 3  no        2026-10-24 18:30  -       -     /opt/x     sh -c 'exit 3'\n\
+web   running   yes       2026-10-24 18:29  -       -     ~/my proj  sh -c 'echo ready; sleep 300'\n";
     assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
 }
 
@@ -1161,9 +1346,9 @@ fn ls_prints_json() {
     let harness = Harness::new();
     let output = ls_output(&harness, &["ls", "--json"]);
     assert_eq!(output.status.code(), Some(0));
-    let expected = "[{\"name\":\"bad\",\"status\":\"error\",\"exit_code\":null,\"attached\":false,\"started\":null,\"cwd\":null,\"command\":null},\
-{\"name\":\"boom\",\"status\":\"exited 3\",\"exit_code\":3,\"attached\":false,\"started\":1792866600,\"cwd\":\"/opt/x\",\"command\":\"sh -c 'exit 3'\"},\
-{\"name\":\"web\",\"status\":\"running\",\"exit_code\":null,\"attached\":true,\"started\":1792866550,\"cwd\":\"/tmp/home/my proj\",\"command\":\"sh -c 'echo ready; sleep 300'\"}]\n";
+    let expected = "[{\"name\":\"bad\",\"status\":\"error\",\"exit_code\":null,\"attached\":false,\"started\":null,\"cwd\":null,\"command\":null,\"domain\":null,\"port\":null},\
+{\"name\":\"boom\",\"status\":\"exited 3\",\"exit_code\":3,\"attached\":false,\"started\":1792866600,\"cwd\":\"/opt/x\",\"command\":\"sh -c 'exit 3'\",\"domain\":null,\"port\":null},\
+{\"name\":\"web\",\"status\":\"running\",\"exit_code\":null,\"attached\":true,\"started\":1792866550,\"cwd\":\"/tmp/home/my proj\",\"command\":\"sh -c 'echo ready; sleep 300'\",\"domain\":null,\"port\":null}]\n";
     assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
 }
 

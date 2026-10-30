@@ -174,7 +174,10 @@ fn acceptance() {
 
     let web_script = real.script("echo ready; sleep 300");
     let started = real.foster_stdout(&["run", "web", "--", "sh", "-c", &web_script]);
-    assert_eq!(started, "started web\n");
+    assert!(
+        started.starts_with("started web on https://web.localhost (port 5"),
+        "{started:?}"
+    );
     let web = real.ls_entry("web").expect("web is listed");
     assert_eq!(web["status"], "running");
     assert_eq!(web["attached"], false);
@@ -186,7 +189,10 @@ fn acceptance() {
 
     let boom_script = real.script("echo kaboom; exit 3");
     let started = real.foster_stdout(&["run", "boom", "--", "sh", "-c", &boom_script]);
-    assert_eq!(started, "started boom\n");
+    assert!(
+        started.starts_with("started boom on https://boom.localhost (port 5"),
+        "{started:?}"
+    );
     poll_until(timeout, interval, || {
         let Some(boom) = real.ls_entry("boom") else {
             return false;
@@ -204,7 +210,10 @@ fn acceptance() {
 
     let rerun_script = real.script("sleep 300");
     let started = real.foster_stdout(&["run", "boom", "--", "sh", "-c", &rerun_script]);
-    assert_eq!(started, "started boom\n");
+    assert!(
+        started.starts_with("started boom on https://boom.localhost (port 5"),
+        "{started:?}"
+    );
     let boom = real.ls_entry("boom").expect("boom is listed");
     assert_eq!(boom["status"], "running");
 
@@ -229,7 +238,10 @@ fn restore_after_the_daemon_is_gone() {
     let interval = Duration::from_millis(100);
     let cwd = std::env::current_dir().expect("current dir");
     let started = real.foster_stdout(&["run", "svc", "--", "sh", "-c", "echo up; sleep 300"]);
-    assert_eq!(started, "started svc\n");
+    assert!(
+        started.starts_with("started svc on https://svc.localhost (port 5"),
+        "{started:?}"
+    );
 
     let killed = real
         .command("foster-zmx", &real.zmx_dir)
