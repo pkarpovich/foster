@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Read;
 use std::os::unix::ffi::OsStringExt;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -15,6 +16,7 @@ const EXECUTABLE: &str = "foster-zmx";
 const NOT_FOUND: &str =
     "foster-zmx not found next to foster or on PATH; build it with zmx/build.sh";
 const EMPTY_LIST_PREFIX: &str = "no sessions found in";
+const ALIAS_PREFIX: &str = "/tmp/foster-";
 const REMOVED_VARS: [&str; 14] = [
     "ZMX_SESSION",
     "ZMX_SESSION_PREFIX",
@@ -144,7 +146,48 @@ pub fn clean_env(command: &mut Command) {
 
 pub struct Zmx {
     executable: PathBuf,
+    state_dir: PathBuf,
     socket_dir: PathBuf,
+}
+
+fn alias_of(sockets: &Path) -> PathBuf {
+    let mut hasher = DefaultHasher::new();
+    sockets.hash(&mut hasher);
+    rustix::process::getuid().as_raw().hash(&mut hasher);
+    PathBuf::from(format!("{ALIAS_PREFIX}{:08x}", hasher.finish() as u32))
+}
+
+// a unix socket path is limited to 104 bytes on macOS, counted as written, so zmx
+// gets a short link to the socket directory and session names can be longer
+fn short_socket_dir(sockets: &Path) -> Result<PathBuf, String> {
+    let alias = alias_of(sockets);
+    let refuse = || {
+        format!(
+            "{} is not foster's link to {}: remove it",
+            alias.display(),
+            sockets.display()
+        )
+    };
+    for _ in 0..2 {
+        match std::fs::symlink_metadata(&alias) {
+            Ok(metadata) => {
+                let target = std::fs::read_link(&alias).ok();
+                let ours = metadata.file_type().is_symlink()
+                    && metadata.uid() == rustix::process::getuid().as_raw()
+                    && target.as_deref() == Some(sockets);
+                return if ours { Ok(alias) } else { Err(refuse()) };
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::os::unix::fs::symlink(sockets, &alias) {
+                    Ok(()) => return Ok(alias),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(format!("link {}: {error}", alias.display())),
+                }
+            }
+            Err(error) => return Err(format!("stat {}: {error}", alias.display())),
+        }
+    }
+    Err(refuse())
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -290,11 +333,14 @@ impl Zmx {
     pub fn locate() -> Result<Zmx, String> {
         let executable = find_executable()?;
         let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
-        let socket_dir = PathBuf::from(home).join(".local/state/foster/zmx");
-        std::fs::create_dir_all(&socket_dir)
-            .map_err(|error| format!("create {}: {error}", socket_dir.display()))?;
+        let state_dir = PathBuf::from(home).join(".local/state/foster");
+        let sockets = state_dir.join("zmx");
+        std::fs::create_dir_all(&sockets)
+            .map_err(|error| format!("create {}: {error}", sockets.display()))?;
+        let socket_dir = short_socket_dir(&sockets)?;
         Ok(Zmx {
             executable,
+            state_dir,
             socket_dir,
         })
     }
@@ -351,9 +397,7 @@ impl Zmx {
     }
 
     pub fn lock(&self, name: &SessionName) -> Result<File, String> {
-        let path = self
-            .socket_dir
-            .with_file_name(format!("{}.lock", name.as_str()));
+        let path = self.state_dir.join(format!("{}.lock", name.as_str()));
         let file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -452,6 +496,29 @@ impl Zmx {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_socket_dir_links_once_and_reuses_the_link() {
+        let home = tempfile::tempdir().expect("temp dir");
+        let sockets = home.path().join("zmx");
+        std::fs::create_dir(&sockets).expect("sockets dir");
+        let alias = short_socket_dir(&sockets).expect("first link");
+        assert!(alias.as_os_str().len() <= 20, "{}", alias.display());
+        assert_eq!(std::fs::read_link(&alias).expect("link"), sockets);
+        assert_eq!(short_socket_dir(&sockets), Ok(alias.clone()));
+        std::fs::remove_file(&alias).expect("remove link");
+    }
+
+    #[test]
+    fn short_socket_dir_refuses_a_link_somewhere_else() {
+        let home = tempfile::tempdir().expect("temp dir");
+        let sockets = home.path().join("zmx");
+        let alias = alias_of(&sockets);
+        std::os::unix::fs::symlink(home.path(), &alias).expect("foreign link");
+        let error = short_socket_dir(&sockets).expect_err("foreign link");
+        std::fs::remove_file(&alias).expect("remove link");
+        assert!(error.contains("is not foster's link"), "{error}");
+    }
 
     #[test]
     fn parses_live_line() {

@@ -32,6 +32,7 @@ claude plugin validate .
 - A session is identified by its name alone. `run` and `task` on a running name attach, or without a terminal print `already running <name>: <command>` and exit 0. Never compare commands: zmx caps the `cmd` and `cwd` fields of `ls` at 256 bytes and cuts them with `...`.
 - A task from a linked worktree is named `<repo>:<worktree>:<slug>` and its domain gets the worktree in front, so worktrees never share a session.
 - Every session gets a port from 51000-51999 and a domain, both stored in its record. `hold` passes them to the command as `PORT` and `FOSTER_DOMAIN`, so `restore` keeps them. Two records without an exit code cannot share a domain.
+- zmx gets `ZMX_DIR=/tmp/foster-<hash>`, a link to `~/.local/state/foster/zmx` owned by the user: the socket path `ZMX_DIR/<name>` must stay under 104 bytes on macOS. Locks and records stay in `~/.local/state/foster`.
 - foster never talks to a proxy. It runs `~/.config/foster/hook` on start and exit (from `hold`) and after `rm`. A failing hook only warns.
 - zmx label values accept only `[a-zA-Z0-9-_.]`, so a label cannot carry a path or a command. Those live in the record.
 - Records in `~/.local/state/foster/sessions/<name>.json` are written through a temp file and a rename. `hold` marks a record exited, `rm` removes it, `restore` starts the records without an exit code.

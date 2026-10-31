@@ -43,7 +43,7 @@ Start a command and attach to it:
 foster run web -- pnpm dev
 ```
 
-A name has 1 to 50 characters: letters, digits, `-`, `_`, `.` and `:`. A running process is identified by its name alone: `foster run` with a name that is already running attaches to it (or, without a terminal, prints `already running <name>: <command>`), whatever command you pass, so a Zed task or a script can call it repeatedly. To change the command of a running process, `foster rm` it first. Command words cannot contain control characters such as tabs or newlines.
+A name has 1 to 80 characters: letters, digits, `-`, `_`, `.` and `:`. A running process is identified by its name alone: `foster run` with a name that is already running attaches to it (or, without a terminal, prints `already running <name>: <command>`), whatever command you pass, so a Zed task or a script can call it repeatedly. To change the command of a running process, `foster rm` it first. Command words cannot contain control characters such as tabs or newlines.
 
 Without a terminal (a script, an agent, a dropped ssh link) the command starts detached and foster prints `started web on https://web.localhost (port 51000)`.
 
@@ -102,7 +102,7 @@ foster rm web
 
 When the command exits, foster prints `foster: <command> exited with <code>` in the session and starts your login shell there. A process that exits stays listed as `exited <code>` with its last screen until you run `foster rm` or start a new `foster run` under the same name.
 
-Sessions live in `~/.local/state/foster/zmx`. Plain `zmx ls` does not see them.
+Sessions live in `~/.local/state/foster/zmx`. Plain `zmx ls` does not see them. A unix socket path is limited to 104 bytes on macOS, so foster hands zmx a short link `/tmp/foster-<hash>` to that directory and refuses to start when that link exists but belongs to someone else or points elsewhere.
 
 ## Hook
 
