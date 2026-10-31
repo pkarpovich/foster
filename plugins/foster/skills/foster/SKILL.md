@@ -58,7 +58,7 @@ named them and they carry the right directory and environment.
 
 ## Starting a process
 
-- Pick a stable name. Letters, digits, `-`, `_`, `.` and `:`, at most 50 characters. Use
+- Pick a stable name. Letters, digits, `-`, `_`, `.` and `:`, at most 80 characters. Use
   `<project>:<service>` (for example `turtle-hub:yotei-app`) so names from different repos do not collide
   and the user can guess them.
 - `cd` to the directory the command must run in first: foster records the caller's directory and starts

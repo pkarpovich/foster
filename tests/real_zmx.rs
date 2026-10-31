@@ -162,6 +162,25 @@ impl Drop for Real {
                 .args(["kill", name])
                 .output();
         }
+        remove_socket_links(self.home.path());
+    }
+}
+
+fn remove_socket_links(home: &Path) {
+    let Ok(entries) = fs::read_dir("/tmp/") else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_foster = path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("foster-"));
+        let Ok(target) = fs::read_link(&path) else {
+            continue;
+        };
+        if is_foster && target.starts_with(home) {
+            let _ = fs::remove_file(&path);
+        }
     }
 }
 

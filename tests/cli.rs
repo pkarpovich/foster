@@ -55,6 +55,30 @@ struct Harness {
     fake_bin: PathBuf,
 }
 
+fn remove_socket_links(home: &Path) {
+    let Ok(entries) = fs::read_dir("/tmp/") else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_foster = path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("foster-"));
+        let Ok(target) = fs::read_link(&path) else {
+            continue;
+        };
+        if is_foster && target.starts_with(home) {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        remove_socket_links(self.home.path());
+    }
+}
+
 impl Harness {
     fn new() -> Harness {
         let home = tempfile::tempdir().expect("temp home");
@@ -851,12 +875,18 @@ fn rm_kills_existing_session() {
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "removed web\n");
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
-    let zmx_dir = harness.home.path().join(".local/state/foster/zmx");
-    let zmx_dir = zmx_dir.display();
-    let expected = format!(
-        "ls ZMX_DIR={zmx_dir} ZMX_SESSION=unset CLAUDECODE=unset\nkill web ZMX_DIR={zmx_dir} ZMX_SESSION=unset CLAUDECODE=unset\n"
+    let calls = harness.zmx_calls();
+    let (_, rest) = calls.split_once("ZMX_DIR=").expect("ZMX_DIR");
+    let (link, _) = rest.split_once(' ').expect("ZMX_DIR value");
+    assert!(link.len() <= 20, "{link}");
+    assert_eq!(
+        fs::read_link(link).expect("ZMX_DIR is a link"),
+        harness.home.path().join(".local/state/foster/zmx")
     );
-    assert_eq!(harness.zmx_calls(), expected);
+    let expected = format!(
+        "ls ZMX_DIR={link} ZMX_SESSION=unset CLAUDECODE=unset\nkill web ZMX_DIR={link} ZMX_SESSION=unset CLAUDECODE=unset\n"
+    );
+    assert_eq!(calls, expected);
 }
 
 #[test]
@@ -1127,6 +1157,25 @@ fn run_wrong_shape_prints_usage() {
 }
 
 #[test]
+fn run_takes_a_long_name_and_names_the_limit_past_it() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let long = format!(
+        "turtle-hub:feat-content-oracle-app-foster-port:{}",
+        "a".repeat(18)
+    );
+    let output = harness.output(&["run", &long, "--", "true"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let too_long = "a".repeat(81);
+    let output = harness.output(&["run", &too_long, "--", "true"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!("foster: name {too_long} is 81 characters, at most 80 fit\n")
+    );
+}
+
+#[test]
 fn run_invalid_name_fails_before_zmx() {
     let harness = Harness::new();
     harness.install_fake_zmx("");
@@ -1326,7 +1375,9 @@ fn ls_output(harness: &Harness, args: &[&str]) -> Output {
     harness.install_fake_zmx(LS_OUTPUT);
     let mut command = harness.foster(args);
     command.env("TZ", "UTC").env("HOME", "/tmp/home");
-    command.output().expect("run foster ls")
+    let output = command.output().expect("run foster ls");
+    remove_socket_links(Path::new("/tmp/home"));
+    output
 }
 
 #[test]
