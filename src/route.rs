@@ -7,6 +7,7 @@ use crate::state::Record;
 const SUFFIX: &str = ".localhost";
 const FIRST_PORT: u16 = 51000;
 const LAST_PORT: u16 = 51999;
+const PATH_PUNCTUATION: &str = "-._~/%:@+;=!$&*";
 
 pub enum Event {
     Start,
@@ -48,6 +49,69 @@ pub fn domain(base: &str, worktree: Option<&str>) -> Result<String, String> {
     }
 }
 
+pub fn parse_paths(text: &str) -> Result<Vec<String>, String> {
+    let mut paths: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        if !word.starts_with('/') {
+            return Err(format!("path prefix {word} does not start with /"));
+        }
+        for character in word.chars() {
+            if !(character.is_ascii_alphanumeric() || PATH_PUNCTUATION.contains(character)) {
+                return Err(format!(
+                    "path prefix {word} has {character:?}: use letters, digits and {PATH_PUNCTUATION}"
+                ));
+            }
+        }
+        let path = word.trim_end_matches('/');
+        if path.is_empty() {
+            return Err(
+                "path prefix / covers the whole domain: leave FOSTER_PATHS out instead".to_string(),
+            );
+        }
+        for known in &paths {
+            if overlaps(known, path) {
+                return Err(format!("path prefixes {known} and {path} overlap"));
+            }
+        }
+        paths.push(path.to_string());
+    }
+    if paths.is_empty() {
+        return Err("FOSTER_PATHS has no path prefix".to_string());
+    }
+    Ok(paths)
+}
+
+fn overlaps(left: &str, right: &str) -> bool {
+    let covers = |outer: &str, inner: &str| {
+        inner == outer
+            || inner
+                .strip_prefix(outer)
+                .is_some_and(|rest| rest.starts_with('/'))
+    };
+    covers(left, right) || covers(right, left)
+}
+
+fn shares_any(left: &[String], right: &[String]) -> bool {
+    if left.is_empty() || right.is_empty() {
+        return left.is_empty() && right.is_empty();
+    }
+    for outer in left {
+        for inner in right {
+            if overlaps(outer, inner) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub fn shown(domain: &str, paths: &[String]) -> String {
+    if paths.is_empty() {
+        return domain.to_string();
+    }
+    format!("{domain} {}", paths.join(" "))
+}
+
 pub fn domain_of_name(name: &str) -> Result<String, String> {
     let last = name.rsplit(':').next().unwrap_or(name);
     domain(last, None)
@@ -78,7 +142,7 @@ pub struct Claims {
     pub owner: Option<String>,
 }
 
-pub fn claims(records: &[Record], name: &str, domain: &str) -> Claims {
+pub fn claims(records: &[Record], name: &str, domain: &str, paths: &[String]) -> Claims {
     let mut ports = Vec::new();
     let mut owner = None;
     for record in records {
@@ -90,6 +154,7 @@ pub fn claims(records: &[Record], name: &str, domain: &str) -> Claims {
             exit_code,
             domain: other_domain,
             port,
+            paths: other_paths,
         } = record;
         if other == name || exit_code.is_some() {
             continue;
@@ -97,7 +162,7 @@ pub fn claims(records: &[Record], name: &str, domain: &str) -> Claims {
         if let Some(port) = port {
             ports.push(*port);
         }
-        if other_domain.as_deref() == Some(domain) {
+        if other_domain.as_deref() == Some(domain) && shares_any(other_paths, paths) {
             owner = Some(other.clone());
         }
     }
@@ -191,6 +256,20 @@ mod tests {
     }
 
     fn record(name: &str, domain: &str, port: u16, exit_code: Option<i32>) -> Record {
+        routed(name, domain, port, exit_code, &[])
+    }
+
+    fn routed(
+        name: &str,
+        domain: &str,
+        port: u16,
+        exit_code: Option<i32>,
+        paths: &[&str],
+    ) -> Record {
+        let mut owned = Vec::new();
+        for path in paths {
+            owned.push(path.to_string());
+        }
         Record {
             name: name.to_string(),
             command: vec!["true".to_string()],
@@ -199,7 +278,91 @@ mod tests {
             exit_code,
             domain: Some(domain.to_string()),
             port: Some(port),
+            paths: owned,
         }
+    }
+
+    fn strings(words: &[&str]) -> Vec<String> {
+        let mut owned = Vec::new();
+        for word in words {
+            owned.push(word.to_string());
+        }
+        owned
+    }
+
+    #[test]
+    fn parse_paths_splits_on_whitespace_and_drops_trailing_slashes() {
+        assert_eq!(
+            parse_paths("  /api   /mcp/\t/.well-known/oauth-protected-resource "),
+            Ok(strings(&[
+                "/api",
+                "/mcp",
+                "/.well-known/oauth-protected-resource"
+            ]))
+        );
+    }
+
+    #[test]
+    fn parse_paths_refuses_bad_prefixes() {
+        assert_eq!(
+            parse_paths("api /mcp"),
+            Err("path prefix api does not start with /".to_string())
+        );
+        assert_eq!(
+            parse_paths("/api,/mcp"),
+            Err(format!(
+                "path prefix /api,/mcp has ',': use letters, digits and {PATH_PUNCTUATION}"
+            ))
+        );
+        assert_eq!(
+            parse_paths("/a{b}"),
+            Err(format!(
+                "path prefix /a{{b}} has '{{': use letters, digits and {PATH_PUNCTUATION}"
+            ))
+        );
+        assert_eq!(
+            parse_paths("/"),
+            Err(
+                "path prefix / covers the whole domain: leave FOSTER_PATHS out instead".to_string()
+            )
+        );
+        assert_eq!(
+            parse_paths("   "),
+            Err("FOSTER_PATHS has no path prefix".to_string())
+        );
+        assert_eq!(
+            parse_paths("/api /api/v2"),
+            Err("path prefixes /api and /api/v2 overlap".to_string())
+        );
+    }
+
+    #[test]
+    fn overlap_respects_segment_boundaries() {
+        assert!(overlaps("/api", "/api"));
+        assert!(overlaps("/api", "/api/v2"));
+        assert!(overlaps("/api/v2", "/api"));
+        assert!(!overlaps("/api", "/apix"));
+        assert!(!overlaps("/api", "/mcp"));
+    }
+
+    #[test]
+    fn claims_share_a_domain_by_disjoint_paths() {
+        let records = vec![
+            record("app", "yotei.localhost", 51000, None),
+            routed("api", "yotei.localhost", 51001, None, &["/api", "/mcp"]),
+        ];
+        let Claims { ports: _, owner } = claims(
+            &records,
+            "health",
+            "yotei.localhost",
+            &strings(&["/healthz"]),
+        );
+        assert_eq!(owner, None);
+        let Claims { ports: _, owner } =
+            claims(&records, "v2", "yotei.localhost", &strings(&["/api/v2"]));
+        assert_eq!(owner, Some("api".to_string()));
+        let Claims { ports: _, owner } = claims(&records, "app2", "yotei.localhost", &[]);
+        assert_eq!(owner, Some("app".to_string()));
     }
 
     #[test]
@@ -209,10 +372,10 @@ mod tests {
             record("api", "api.localhost", 51001, None),
             record("old", "web.localhost", 51002, Some(0)),
         ];
-        let Claims { ports, owner } = claims(&records, "web", "web.localhost");
+        let Claims { ports, owner } = claims(&records, "web", "web.localhost", &[]);
         assert_eq!(ports, vec![51001]);
         assert_eq!(owner, None);
-        let Claims { ports, owner } = claims(&records, "web2", "api.localhost");
+        let Claims { ports, owner } = claims(&records, "web2", "api.localhost", &[]);
         assert_eq!(ports, vec![51000, 51001]);
         assert_eq!(owner, Some("api".to_string()));
     }

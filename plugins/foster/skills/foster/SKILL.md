@@ -27,7 +27,7 @@ tell the user and fall back to whatever they normally use.
 | Command | What it does | Agent use |
 |---|---|---|
 | `foster run <name> -- <command...>` | Start the command in the current directory. With a terminal it attaches; without one it prints `started <name> on https://<domain> (port <port>)` and returns. | Yes |
-| `foster ls --json` | One JSON array: `name`, `status` (`running`, `exited <code>`, `stopped`, `error`), `exit_code`, `attached`, `started` (epoch seconds), `cwd`, `command`, `domain`, `port`. | Yes |
+| `foster ls --json` | One JSON array: `name`, `status` (`running`, `exited <code>`, `stopped`, `error`), `exit_code`, `attached`, `started` (epoch seconds), `cwd`, `command`, `domain`, `port`, `paths`. | Yes |
 | `foster history <name>` | Scrollback and screen as plain text, then exit. | Yes |
 | `foster history <name> -f` | The same, then keeps streaming new output until killed. | Only under a timeout |
 | `foster tail <name>` | Streams only new output, escape codes included, until killed. | Only under a timeout |
@@ -53,6 +53,9 @@ named them and they carry the right directory and environment.
   code instead of attaching to the main checkout's process.
 - `FOSTER_DOMAIN` in a task's `env` names its domain (`yotei` gives `yotei.localhost`); foster removes it
   from the command's environment and passes the final domain.
+- `FOSTER_PATHS` in a task's `env` mounts it under path prefixes on its domain, separated by spaces
+  (`"/api /mcp"`), so an app and its API share one origin. On a domain only one running task may have no
+  paths, and the others' prefixes must not overlap; foster refuses the start otherwise and names the owner.
 - Task commands run through `/bin/sh -c`, whoever calls foster, so they behave the same from an agent,
   a terminal or Zed.
 

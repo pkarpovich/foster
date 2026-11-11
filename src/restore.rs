@@ -50,6 +50,7 @@ fn restore(
         exit_code: _,
         domain,
         port,
+        paths,
     } = record;
     let session = SessionName::parse(&name)?;
     let _lock = zmx.lock(&session)?;
@@ -68,7 +69,7 @@ fn restore(
     let Claims {
         mut ports,
         owner: _,
-    } = route::claims(records, &name, &domain);
+    } = route::claims(records, &name, &domain, &paths);
     ports.extend_from_slice(assigned);
     let port = route::pick_port(&ports, port).map_err(|error| format!("{name}: {error}"))?;
     assigned.push(port);
@@ -81,6 +82,7 @@ fn restore(
         exit_code: None,
         domain: Some(domain),
         port: Some(port),
+        paths,
     })?;
     zmx.create_detached(&session, &argv, &cwd)
         .map_err(|error| format!("{name}: {error}"))?;

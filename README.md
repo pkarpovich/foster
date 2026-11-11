@@ -60,7 +60,7 @@ foster ls
 foster ls --json
 ```
 
-`--json` prints one array. Each object has `name`, `status` (`running`, `exited <code>`, `stopped` or `error`), `exit_code` (number or null), `attached` (bool), `started` (epoch seconds or null), `cwd` (path or null), `command` (string or null), `domain` (string or null) and `port` (number or null).
+`--json` prints one array. Each object has `name`, `status` (`running`, `exited <code>`, `stopped` or `error`), `exit_code` (number or null), `attached` (bool), `started` (epoch seconds or null), `cwd` (path or null), `command` (string or null), `domain` (string or null), `port` (number or null) and `paths` (the path prefixes the process is mounted under, empty for the whole domain).
 
 Attach to a process. Ctrl+C (or Ctrl+\) detaches and leaves the process running. Ctrl+C never reaches the process, so stop it with `foster rm`. When a second terminal attaches, the first one shows a cover; press any key there to take the process back:
 
@@ -79,6 +79,8 @@ foster tail web
 Start a task the project already defines for Zed. foster reads `.zed/tasks.json` at the root of the git checkout, names each task `<repository>:<label as a slug>`, and starts it like `foster run` with the task's `command` and `args` through `/bin/sh -c` (the same for every caller), its `cwd` and its `env`. `$ZED_WORKTREE_ROOT` and `$ZED_MAIN_GIT_WORKTREE` are filled in; a task that needs any other editor variable (`$ZED_FILE`, `$ZED_STEM`, ...) without a default is listed but refused.
 
 The repository name comes from git. A linked worktree adds its folder to the name and to the domain, so it runs its own copy of a task instead of attaching to the main checkout's: in `~/worktrees/feat-x` the task `web: dev` is `<repository>:feat-x:web-dev` on `feat-x.web-dev.localhost`. `FOSTER_DOMAIN` in the task's `env` names the domain instead of the label (`"FOSTER_DOMAIN": "web"` gives `web.localhost`, and `feat-x.web.localhost` in that worktree); foster takes it out of the command's environment and passes the final domain instead.
+
+Two tasks can share one domain, split by path, the way a production edge proxy routes `/api` to a service and everything else to the app. `FOSTER_PATHS` in a task's `env` lists the path prefixes it serves, separated by spaces: `"FOSTER_DOMAIN": "web", "FOSTER_PATHS": "/api /mcp"`. On one domain at most one running task has no `FOSTER_PATHS` and gets every other path, and the prefixes of the others must not overlap (`/api` and `/api/v2` overlap, `/api` and `/apix` do not). Every prefix starts with `/`, `/` alone is refused, and a trailing `/` is dropped. foster keeps `FOSTER_PATHS` out of the command's environment, records the prefixes and shows them after the domain. `foster run` takes neither variable: foster sets `FOSTER_DOMAIN` on every process it starts, so a `run` inside a session would inherit someone else's.
 
 ```
 foster task                     # list: name, Zed label, domain, command

@@ -19,10 +19,15 @@ pub fn run(args: &[&str]) -> Result<(), String> {
     for word in command {
         words.push(word.to_string());
     }
-    start(name, words, domain)
+    start(name, words, domain, Vec::new())
 }
 
-pub fn start(name: &str, command: Vec<String>, domain: String) -> Result<(), String> {
+pub fn start(
+    name: &str,
+    command: Vec<String>,
+    domain: String,
+    paths: Vec<String>,
+) -> Result<(), String> {
     for word in &command {
         if word.chars().any(char::is_control) {
             return Err(format!(
@@ -45,10 +50,16 @@ pub fn start(name: &str, command: Vec<String>, domain: String) -> Result<(), Str
         zmx.kill(&name, session.kill_mode())?;
     }
     let records = state::load_all()?;
-    let Claims { ports, owner } = route::claims(&records, name.as_str(), &domain);
+    let Claims { ports, owner } = route::claims(&records, name.as_str(), &domain, &paths);
     if let Some(owner) = owner {
+        if paths.is_empty() {
+            return Err(format!(
+                "domain {domain} belongs to {owner}: set FOSTER_DOMAIN in the task or foster rm {owner}"
+            ));
+        }
         return Err(format!(
-            "domain {domain} belongs to {owner}: set FOSTER_DOMAIN in the task or foster rm {owner}"
+            "paths {} on {domain} overlap with {owner}: change FOSTER_PATHS in the task or foster rm {owner}",
+            paths.join(" ")
         ));
     }
     let port = route::pick_port(&ports, None)?;
@@ -61,16 +72,25 @@ pub fn start(name: &str, command: Vec<String>, domain: String) -> Result<(), Str
         exit_code: None,
         domain: Some(domain.clone()),
         port: Some(port),
+        paths: paths.clone(),
     })?;
     if std::io::stdin().is_terminal() {
         drop(lock);
         return proxy::attach(&zmx, &name, &argv);
     }
     zmx.create_detached(&name, &argv, &cwd)?;
-    println!(
-        "started {} on https://{domain} (port {port})",
-        name.as_str()
-    );
+    if paths.is_empty() {
+        println!(
+            "started {} on https://{domain} (port {port})",
+            name.as_str()
+        );
+    } else {
+        println!(
+            "started {} on https://{domain} for {} (port {port})",
+            name.as_str(),
+            paths.join(" ")
+        );
+    }
     Ok(())
 }
 

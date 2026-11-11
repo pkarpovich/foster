@@ -627,6 +627,77 @@ fn run_refuses_a_domain_another_session_owns() {
     assert_eq!(zmx_calls_without_env(&harness), vec!["ls".to_string()]);
 }
 
+fn write_path_record(harness: &Harness, name: &str, domain: &str, paths: &[&str]) {
+    let path = record_path(harness, name);
+    fs::create_dir_all(path.parent().expect("sessions dir")).expect("create sessions dir");
+    let record = serde_json::json!({
+        "name": name,
+        "command": ["true"],
+        "cwd": harness.home.path(),
+        "started": 1,
+        "exit_code": null,
+        "domain": domain,
+        "port": 51998,
+        "paths": paths,
+    });
+    fs::write(path, record.to_string()).expect("write record");
+}
+
+const SPLIT_TASKS: &str = r#"[
+    { "label": "app", "command": "pnpm dev", "env": { "FOSTER_DOMAIN": "yotei" } },
+    {
+        "label": "api",
+        "command": "go run .",
+        "env": { "FOSTER_DOMAIN": "yotei", "FOSTER_PATHS": "/api /mcp" },
+    },
+    {
+        "label": "v2",
+        "command": "go run ./v2",
+        "env": { "FOSTER_DOMAIN": "yotei", "FOSTER_PATHS": "/api/v2" },
+    },
+]"#;
+
+#[test]
+fn task_shares_a_domain_by_path_prefixes() {
+    let harness = Harness::new();
+    harness.install_fake_zmx("");
+    let repo = task_project(&harness, SPLIT_TASKS);
+    write_path_record(&harness, "myrepo:app", "yotei.localhost", &[]);
+    let output = harness
+        .foster(&["task", "api"])
+        .current_dir(&repo)
+        .output()
+        .expect("run foster");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.starts_with("started myrepo:api on https://yotei.localhost for /api /mcp (port "),
+        "{stdout}"
+    );
+    let text = fs::read_to_string(record_path(&harness, "myrepo:api")).expect("record");
+    let record: serde_json::Value = serde_json::from_str(&text).expect("json record");
+    assert_eq!(record["paths"], serde_json::json!(["/api", "/mcp"]));
+    let overlap = harness
+        .foster(&["task", "v2"])
+        .current_dir(&repo)
+        .output()
+        .expect("run foster");
+    assert_eq!(overlap.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&overlap.stderr),
+        "foster: paths /api/v2 on yotei.localhost overlap with myrepo:api: change FOSTER_PATHS in the task or foster rm myrepo:api\n"
+    );
+    let listed = harness
+        .foster(&["task"])
+        .current_dir(&repo)
+        .output()
+        .expect("run foster");
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains("yotei.localhost /api /mcp"),
+        "{listed:?}"
+    );
+}
+
 #[test]
 fn hold_gives_the_command_its_port_and_domain() {
     let harness = Harness::new();
@@ -1397,9 +1468,9 @@ fn ls_prints_json() {
     let harness = Harness::new();
     let output = ls_output(&harness, &["ls", "--json"]);
     assert_eq!(output.status.code(), Some(0));
-    let expected = "[{\"name\":\"bad\",\"status\":\"error\",\"exit_code\":null,\"attached\":false,\"started\":null,\"cwd\":null,\"command\":null,\"domain\":null,\"port\":null},\
-{\"name\":\"boom\",\"status\":\"exited 3\",\"exit_code\":3,\"attached\":false,\"started\":1792866600,\"cwd\":\"/opt/x\",\"command\":\"sh -c 'exit 3'\",\"domain\":null,\"port\":null},\
-{\"name\":\"web\",\"status\":\"running\",\"exit_code\":null,\"attached\":true,\"started\":1792866550,\"cwd\":\"/tmp/home/my proj\",\"command\":\"sh -c 'echo ready; sleep 300'\",\"domain\":null,\"port\":null}]\n";
+    let expected = "[{\"name\":\"bad\",\"status\":\"error\",\"exit_code\":null,\"attached\":false,\"started\":null,\"cwd\":null,\"command\":null,\"domain\":null,\"port\":null,\"paths\":[]},\
+{\"name\":\"boom\",\"status\":\"exited 3\",\"exit_code\":3,\"attached\":false,\"started\":1792866600,\"cwd\":\"/opt/x\",\"command\":\"sh -c 'exit 3'\",\"domain\":null,\"port\":null,\"paths\":[]},\
+{\"name\":\"web\",\"status\":\"running\",\"exit_code\":null,\"attached\":true,\"started\":1792866550,\"cwd\":\"/tmp/home/my proj\",\"command\":\"sh -c 'echo ready; sleep 300'\",\"domain\":null,\"port\":null,\"paths\":[]}]\n";
     assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
 }
 
