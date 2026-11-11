@@ -16,6 +16,8 @@ pub struct Record {
     pub domain: Option<String>,
     #[serde(default)]
     pub port: Option<u16>,
+    #[serde(default)]
+    pub paths: Vec<String>,
 }
 
 pub fn now() -> i64 {

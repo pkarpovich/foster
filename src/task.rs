@@ -15,6 +15,7 @@ const WORKTREE_ROOT: &str = "ZED_WORKTREE_ROOT";
 const MAIN_WORKTREE: &str = "ZED_MAIN_GIT_WORKTREE";
 const TASK_SHELL: &str = "/bin/sh";
 const DOMAIN_VARIABLE: &str = "FOSTER_DOMAIN";
+const PATHS_VARIABLE: &str = "FOSTER_PATHS";
 const HEADER: [&str; 4] = ["NAME", "LABEL", "DOMAIN", "COMMAND"];
 
 #[derive(Deserialize)]
@@ -40,6 +41,7 @@ struct Entry {
     name: String,
     label: String,
     domain: String,
+    paths: Vec<String>,
     command: String,
     cwd: String,
     needs: Option<String>,
@@ -87,7 +89,7 @@ fn list(resolved: &[Resolved], format: Format) -> Result<(), String> {
                 lines.push(vec![
                     entry.name.clone(),
                     label,
-                    entry.domain.clone(),
+                    route::shown(&entry.domain, &entry.paths),
                     entry.command.clone(),
                 ]);
             }
@@ -124,7 +126,7 @@ fn start(project: &Project, resolved: Vec<Resolved>, name: &str) -> Result<(), S
         return Err(format!("task \"{}\" needs Zed (${variable})", entry.label));
     }
     std::env::set_current_dir(&entry.cwd).map_err(|error| format!("cd {}: {error}", entry.cwd))?;
-    run::start(&entry.name, argv, entry.domain)
+    run::start(&entry.name, argv, entry.domain, entry.paths)
 }
 
 fn locate() -> Result<Project, String> {
@@ -328,11 +330,15 @@ fn resolve(project: &Project, task: ZedTask) -> Result<Resolved, String> {
         None => project.root.display().to_string(),
     };
     let mut base = slug;
+    let mut paths = Vec::new();
     let mut assignments = Vec::new();
     for (key, value) in &env {
         let value = expand_or_note(value);
         if key == DOMAIN_VARIABLE {
             base = value;
+        } else if key == PATHS_VARIABLE {
+            paths =
+                route::parse_paths(&value).map_err(|error| format!("task \"{label}\": {error}"))?;
         } else {
             assignments.push(format!("{key}={value}"));
         }
@@ -352,6 +358,7 @@ fn resolve(project: &Project, task: ZedTask) -> Result<Resolved, String> {
             name,
             label,
             domain,
+            paths,
             command: line,
             cwd,
             needs,
@@ -504,6 +511,37 @@ mod tests {
         let linked = resolve(&worktree_project(), task).expect("resolve");
         assert_eq!(linked.entry.domain, "feat-x.yotei.localhost");
         assert_eq!(linked.argv, vec!["/bin/sh", "-c", "pnpm dev"]);
+    }
+
+    #[test]
+    fn foster_paths_mounts_a_task_under_prefixes_and_stays_out_of_the_command_env() {
+        let task = served(
+            "yotei",
+            &[
+                ("FOSTER_DOMAIN", "yotei"),
+                (
+                    "FOSTER_PATHS",
+                    "/api  /mcp /.well-known/oauth-protected-resource",
+                ),
+            ],
+        );
+        let resolved = resolve(&worktree_project(), task).expect("resolve");
+        assert_eq!(resolved.entry.domain, "feat-x.yotei.localhost");
+        assert_eq!(
+            resolved.entry.paths,
+            vec!["/api", "/mcp", "/.well-known/oauth-protected-resource"]
+        );
+        assert_eq!(resolved.argv, vec!["/bin/sh", "-c", "pnpm dev"]);
+    }
+
+    #[test]
+    fn foster_paths_with_a_bad_prefix_fails_the_task() {
+        let task = served("yotei", &[("FOSTER_PATHS", "api /mcp")]);
+        let error = resolve(&project(), task).err().expect("bad prefix");
+        assert_eq!(
+            error,
+            "task \"yotei\": path prefix api does not start with /"
+        );
     }
 
     #[test]

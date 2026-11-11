@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::hold::render_command;
 use crate::output::emit;
+use crate::route;
 use crate::state::{self, Record};
 use crate::table;
 use crate::zmx::{Session, Zmx, launched_command};
@@ -26,6 +27,7 @@ struct Row {
     command: Option<String>,
     domain: Option<String>,
     port: Option<u16>,
+    paths: Vec<String>,
 }
 
 enum Format {
@@ -48,6 +50,7 @@ pub fn run(args: &[&str]) -> Result<(), String> {
             if record.name == row.name {
                 row.domain.clone_from(&record.domain);
                 row.port = record.port;
+                row.paths.clone_from(&record.paths);
             }
         }
         rows.push(row);
@@ -89,6 +92,7 @@ fn row(session: Session) -> Row {
             command: None,
             domain: None,
             port: None,
+            paths: Vec::new(),
         },
         Session::Live {
             name,
@@ -115,6 +119,7 @@ fn row(session: Session) -> Row {
                 command,
                 domain: None,
                 port: None,
+                paths: Vec::new(),
             }
         }
     }
@@ -129,6 +134,7 @@ fn record_row(record: Record) -> Row {
         exit_code,
         domain,
         port,
+        paths,
     } = record;
     let status = match exit_code {
         Some(code) => format!("exited {code}"),
@@ -144,6 +150,7 @@ fn record_row(record: Record) -> Row {
         command: Some(render_command(&command)),
         domain,
         port,
+        paths,
     }
 }
 
@@ -192,6 +199,7 @@ fn render_table(rows: &[Row], home: Option<&Path>, terminal: Option<usize>) -> S
         command,
         domain,
         port,
+        paths,
     } in rows
     {
         let attached = if *attached { "yes" } else { "no" };
@@ -208,7 +216,7 @@ fn render_table(rows: &[Row], home: Option<&Path>, terminal: Option<usize>) -> S
             None => "-".to_string(),
         };
         let domain = match domain {
-            Some(domain) => domain.clone(),
+            Some(domain) => route::shown(domain, paths),
             None => "-".to_string(),
         };
         let port = match port {
@@ -269,6 +277,7 @@ mod tests {
                 command: Some("sh -c 'a -- b'".to_string()),
                 domain: None,
                 port: None,
+                paths: Vec::new(),
             }
         );
     }
@@ -298,6 +307,7 @@ mod tests {
                 command: None,
                 domain: None,
                 port: None,
+                paths: Vec::new(),
             }
         );
     }
@@ -331,6 +341,7 @@ mod tests {
                 command: Some("pnpm dev".to_string()),
                 domain: Some("web.localhost".to_string()),
                 port: Some(51000),
+                paths: Vec::new(),
             },
             Row {
                 name: "bad".to_string(),
@@ -342,6 +353,7 @@ mod tests {
                 command: None,
                 domain: None,
                 port: None,
+                paths: Vec::new(),
             },
         ];
         let expected = "NAME  STATUS   ATTACHED  STARTED  DOMAIN         PORT   CWD  COMMAND\n\
@@ -366,6 +378,7 @@ mod tests {
             command: Some("a\tb\nc".to_string()),
             domain: None,
             port: None,
+            paths: Vec::new(),
         }];
         let table = render_table(&rows, None, None);
         assert!(!table.contains('\x1b'), "{table:?}");
@@ -385,6 +398,7 @@ mod tests {
             exit_code: None,
             domain: None,
             port: None,
+            paths: Vec::new(),
         };
         let stopped = record_row(record.clone());
         assert_eq!(stopped.status, "stopped");
@@ -416,6 +430,7 @@ mod tests {
             command: Some("mise exec -- pnpm dev".to_string()),
             domain: Some("yotei.localhost".to_string()),
             port: Some(51004),
+            paths: Vec::new(),
         }
     }
 
