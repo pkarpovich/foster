@@ -156,11 +156,14 @@ pub fn claims(records: &[Record], name: &str, domain: &str, paths: &[String]) ->
             port,
             paths: other_paths,
         } = record;
-        if other == name || exit_code.is_some() {
+        if other == name {
             continue;
         }
         if let Some(port) = port {
             ports.push(*port);
+        }
+        if exit_code.is_some() {
+            continue;
         }
         if other_domain.as_deref() == Some(domain) && shares_any(other_paths, paths) {
             owner = Some(other.clone());
@@ -366,17 +369,17 @@ mod tests {
     }
 
     #[test]
-    fn claims_ignore_the_same_name_and_exited_records() {
+    fn claims_keep_the_ports_of_exited_records_but_not_their_domains() {
         let records = vec![
             record("web", "web.localhost", 51000, None),
             record("api", "api.localhost", 51001, None),
             record("old", "web.localhost", 51002, Some(0)),
         ];
         let Claims { ports, owner } = claims(&records, "web", "web.localhost", &[]);
-        assert_eq!(ports, vec![51001]);
+        assert_eq!(ports, vec![51001, 51002]);
         assert_eq!(owner, None);
         let Claims { ports, owner } = claims(&records, "web2", "api.localhost", &[]);
-        assert_eq!(ports, vec![51000, 51001]);
+        assert_eq!(ports, vec![51000, 51001, 51002]);
         assert_eq!(owner, Some("api".to_string()));
     }
 }
